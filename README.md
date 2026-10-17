@@ -6,7 +6,8 @@ authentication, database, or business API is implemented yet.
 ## Technology
 
 - **Backend:** Java 21, Spring Boot 4.1.1, Maven.
-- **Frontend:** React 19, TypeScript 5.9, Vite 8, Material UI 9 with Emotion.
+- **Frontend:** React 19, TypeScript 5.9, Vite 8, Material UI 9 with Emotion,
+  React Router, TanStack Query, and Axios.
 - **Infrastructure:** AWS CDK v2 in TypeScript, with an empty, environment-agnostic stack.
 - **Tooling:** npm workspaces, Docker Compose, GitHub Actions.
 
@@ -154,9 +155,24 @@ No persistence driver, JPA, Lombok, or authentication library is included.
 npm run dev
 ```
 
-Open `http://localhost:5173` for the static Material UI starter page.
-The frontend does not call the backend yet. The backend's local CORS policy
-allows it to call `http://localhost:8080/api/health` directly; no proxy is needed.
+Open `http://localhost:5173` for the responsive developer dashboard. The sidebar
+links to Overview, Repositories, Workflow Failures, Analytics, and Settings.
+Repository search, failure filtering, and chart period selectors operate on
+explicitly labeled sample data; no GitHub connection is required.
+
+The backend health indicator calls `GET /api/health` using a shared Axios client
+and TanStack Query. It shows checking, connected (`status: "UP"`), non-UP, invalid
+response, and unreachable states. It refreshes every 30 seconds and offers a
+manual retry. This is application liveness, not external dependency health.
+
+The API origin defaults to `http://localhost:8080`. To override it, copy
+`frontend/.env.example` to `frontend/.env.local` and set `VITE_API_BASE_URL`
+(an origin without `/api`). Restart Vite after changes. Vite substitutes these
+values at **build time**; production/Docker bundles need a rebuild with the
+desired environment supplied to the build. Never put secrets in `VITE_*` values.
+The backend's local CORS policy allows the standard Vite and Docker origins.
+For another frontend port or production domain, configure the backend's
+`CORS_ALLOWED_ORIGINS` accordingly. No proxy is required.
 
 ```sh
 npm run build --workspace frontend
@@ -222,9 +238,12 @@ docker compose -f docker/compose.yaml config --quiet
 
 The root npm build compiles the frontend and infrastructure, **not** the Maven
 backend. GitHub Actions runs independent backend verification, frontend build,
-and CDK synthesis jobs on pushes and pull requests. Frontend and infrastructure
-behavioral test frameworks are intentionally deferred until functionality exists.
+and CDK synthesis jobs on pushes and pull requests. The frontend can also be smoke-tested in a browser: navigate all five routes,
+filter sample repositories and failures, resize to mobile and use the navigation
+drawer, and verify health checking with the backend both running and stopped.
+Health responses can be intercepted to verify non-UP and malformed payloads.
+No automated frontend test framework is configured yet.
 
 Keep credentials out of source control. Local `.env` files and CDK context are
-ignored; no application-specific secrets or environment variables are required
-by this scaffold.
+ignored. The frontend's optional public API URL is documented above; no secrets
+are required by this scaffold.

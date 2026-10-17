@@ -1,7 +1,8 @@
 # Architecture
 
-This repository establishes component boundaries only. It does not implement
-GitHub access, CI data ingestion, analysis, storage, or AWS resources.
+This repository provides a developer dashboard and backend health API with
+established component boundaries. It does not implement GitHub access, CI data
+ingestion, analysis, storage, or AWS resources.
 
 ## Backend
 
@@ -35,15 +36,25 @@ configuration without external services.
 | Folder | Intended responsibility |
 | --- | --- |
 | `components` | Reusable presentation components |
-| `pages` | Page-level composition; currently a static landing page |
-| `services` | Future typed API clients |
+| `pages` | Overview, Repositories, Workflow Failures, Analytics, and Settings |
+| `services` | Centralized Axios API client and explicitly labeled demo fixtures |
 | `hooks` | Reusable React hooks |
 | `types` | Shared TypeScript contracts |
 | `layouts` | Shared application shell |
 
-The application uses Material UI's theme and CSS baseline. No router, state
-management library, HTTP client library, or component test framework is needed
-for the initial single-page scaffold.
+The application uses Material UI's theme and CSS baseline with a responsive
+Drawer/AppBar shell. React Router provides nested routes and a not-found page;
+production hosts must fall back to `index.html` for client routes (the provided
+nginx configuration does this).
+
+TanStack Query owns server state and shares the health query between all
+indicators. The centralized Axios client uses public, build-time
+`VITE_API_BASE_URL` configuration (default `http://localhost:8080`) and an
+8-second timeout. Health responses are validated before rendering; transport
+and payload failures are surfaced, not replaced with demo success.
+The health query polls every 30 seconds and supports manual retries.
+Other pages use local demo fixtures; search, repository filters, and period
+selectors do not make API requests. No component test framework is configured.
 
 ## Infrastructure and operations
 
