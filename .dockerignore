@@ -1,0 +1,13 @@
+.git
+.github
+**/node_modules
+**/dist
+**/target
+**/cdk.out
+**/coverage
+**/.env
+**/.env.*
+**/*.log
+.idea
+.vscode
+docs

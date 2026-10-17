@@ -1,0 +1,20 @@
+{
+  "name": "github-ci-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub CI Intelligence monorepo",
+  "workspaces": [
+    "frontend",
+    "infrastructure"
+  ],
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace frontend",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "infra:synth": "npm run synth --workspace infrastructure"
+  }
+}

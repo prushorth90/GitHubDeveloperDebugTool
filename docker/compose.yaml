@@ -1,0 +1,18 @@
+name: github-ci-intelligence
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend.Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PORT: "8080"
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "127.0.0.1:3000:80"

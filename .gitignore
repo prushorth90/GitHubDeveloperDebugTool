@@ -1,0 +1,24 @@
+# Build output and dependencies
+**/node_modules/
+**/dist/
+**/target/
+**/coverage/
+**/cdk.out/
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+infrastructure/cdk.context.json
+
+# Editors and operating systems
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

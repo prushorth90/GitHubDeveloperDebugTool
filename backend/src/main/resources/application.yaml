@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: github-ci-intelligence
+
+server:
+  port: ${PORT:8080}
