@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!frontend/
+!frontend/**
+!infrastructure/
+!infrastructure/package.json
+!docker/
+!docker/nginx.conf
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

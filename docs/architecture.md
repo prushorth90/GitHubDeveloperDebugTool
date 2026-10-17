@@ -49,7 +49,8 @@ nginx configuration does this).
 
 TanStack Query owns server state and shares the health query between all
 indicators. The centralized Axios client uses public, build-time
-`VITE_API_BASE_URL` configuration (default `http://localhost:8080`) and an
+`VITE_API_BASE_URL` configuration (default `http://localhost:8080` locally,
+`/` in Docker for same-origin API requests) and an
 8-second timeout. Health responses are validated before rendering; transport
 and payload failures are surfaced, not replaced with demo success.
 The health query polls every 30 seconds and supports manual retries.
@@ -64,8 +65,13 @@ environment-agnostic stack. Add resource definitions under
 are established. Compiled JavaScript and synthesized templates are generated
 artifacts, not source files.
 
-[`docker`](../docker) holds independent frontend and backend images plus local
-Compose orchestration. [`CI`](../.github/workflows/ci.yml) validates all three
+[`docker`](../docker) holds multistage frontend and backend Dockerfiles, dedicated
+build-context ignore files, and Nginx configuration.
+[`docker-compose.yml`](../docker-compose.yml) connects both services on a bridge
+network and waits for backend health before starting Nginx. Nginx serves the SPA
+and proxies `/api` requests unchanged to `backend:8080`; the browser never uses
+Docker-internal hostnames. Both services have container health checks.
+[`CI`](../.github/workflows/ci.yml) validates all three
 components without AWS credentials or deployment permissions.
 
 See the [root README](../README.md) for setup and execution commands.

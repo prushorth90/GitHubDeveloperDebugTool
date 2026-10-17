@@ -55,7 +55,9 @@ The CDK CLI and library have independent version numbers.
 │   ├── cdk.json
 │   ├── package.json
 │   └── tsconfig.json
-├── docker/                     # Dockerfiles, nginx, Compose
+├── docker/                     # Dockerfiles, build-context ignores, nginx
+├── docker-compose.yml
+├── .env.example                # Optional Compose configuration
 ├── .github/workflows/ci.yml
 ├── docs/
 ├── .editorconfig
@@ -169,10 +171,13 @@ The API origin defaults to `http://localhost:8080`. To override it, copy
 `frontend/.env.example` to `frontend/.env.local` and set `VITE_API_BASE_URL`
 (an origin without `/api`). Restart Vite after changes. Vite substitutes these
 values at **build time**; production/Docker bundles need a rebuild with the
-desired environment supplied to the build. Never put secrets in `VITE_*` values.
+desired environment supplied to the build. Docker builds default to `/` instead,
+so API requests use the frontend origin and Nginx's `/api` proxy.
+Never put secrets in `VITE_*` values.
 The backend's local CORS policy allows the standard Vite and Docker origins.
 For another frontend port or production domain, configure the backend's
-`CORS_ALLOWED_ORIGINS` accordingly. No proxy is required.
+`CORS_ALLOWED_ORIGINS` accordingly. Local Vite development calls the backend
+directly; Docker uses the same-origin proxy and does not require CORS.
 
 ```sh
 npm run build --workspace frontend
@@ -209,13 +214,55 @@ needed. These commands may access or modify AWS; CI never deploys.
 
 ## Docker
 
+Install Docker Engine/Desktop with Compose v2 and start the Docker daemon.
+No host Java, Maven, Node.js, AWS credentials, or application secrets are needed.
+From the repository root:
+
 ```sh
-docker compose -f docker/compose.yaml up --build
+# Optional: customize the documented defaults
+cp .env.example .env
+
+docker compose up --build
 ```
 
 - Frontend: `http://localhost:3000` (production assets served by nginx).
 - Backend: `http://localhost:8080` (Java 21 runtime).
 - Both published ports bind only to the local machine.
+
+Both services join the same Compose-managed bridge network. The browser calls
+`/api/...` on `localhost:3000`; Nginx forwards the unchanged path to
+`backend:8080` over that network. Docker-internal names never need to resolve in
+the browser. React client routes fall back to `index.html`; API failures are
+returned by the backend, not replaced by the SPA.
+
+The backend uses a multistage Maven build and a non-root Java 21 JRE runtime.
+Its health check probes `/actuator/health`. Compose waits for a healthy backend
+before starting the frontend. The frontend uses a Node build stage and an Nginx
+runtime whose health check probes `/healthz`. The UI's health indicator verifies
+the full browser-to-proxy-to-backend path via `/api/health`.
+
+### Container configuration
+
+Compose reads optional overrides from the root `.env` (or the shell):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FRONTEND_PORT` | `3000` | Frontend's localhost-only published port |
+| `BACKEND_PORT` | `8080` | Backend's localhost-only published port; internal port stays 8080 |
+| `SPRING_PROFILES_ACTIVE` | `prod` | Spring profile, with graceful shutdown and health-only Actuator |
+| `CORS_ALLOWED_ORIGINS` | empty | Optional comma-separated origins for direct cross-origin API access |
+| `JAVA_TOOL_OPTIONS` | empty | Optional JVM flags, e.g. `-Xmx512m` |
+| `VITE_API_BASE_URL` | `/` | Public build-time API base; keep `/` for the same-origin proxy |
+
+Changing `VITE_API_BASE_URL` requires rebuilding the frontend. Other values are
+runtime/Compose configuration; rerun `docker compose up -d` to apply changes.
+The frontend's local `.env.*` files are excluded from Docker builds. Each
+Dockerfile has a dedicated `.dockerignore` allowlist to exclude unrelated files,
+host build output, local environment files, and private keys from its context.
+There are no hardcoded application secrets, and no credentials are required.
+Do not put secrets in build arguments, `VITE_*` variables, images, or committed
+environment files. Future credentials should use an appropriate secret store
+or mounted Docker secrets rather than frontend configuration.
 
 Stop local servers using these ports before starting Compose. Docker builds
 use the repository root as their context, and the backend image build runs
@@ -223,7 +270,18 @@ its backend tests. Source changes require an image rebuild; this is not a
 hot-reload setup.
 
 ```sh
-docker compose -f docker/compose.yaml down
+# Alternatively, build and start detached, waiting for both health checks:
+docker compose up --build -d --wait
+docker compose ps
+curl --fail http://localhost:3000/healthz
+curl --fail http://localhost:3000/api/health
+curl --fail http://localhost:8080/actuator/health
+
+# Inspect startup/API errors
+docker compose logs backend frontend
+
+# Stop and remove this application's containers and network
+docker compose down
 ```
 
 ## Validation and CI
@@ -233,7 +291,7 @@ mvn -f backend/pom.xml verify
 npm run typecheck
 npm run build
 npm run infra:synth
-docker compose -f docker/compose.yaml config --quiet
+docker compose config --quiet
 ```
 
 The root npm build compiles the frontend and infrastructure, **not** the Maven

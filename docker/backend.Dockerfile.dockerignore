@@ -1,0 +1,9 @@
+**
+!backend/
+!backend/pom.xml
+!backend/src/
+!backend/src/**
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
