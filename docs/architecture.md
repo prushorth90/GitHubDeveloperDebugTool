@@ -6,7 +6,7 @@ GitHub access, CI data ingestion, analysis, storage, or AWS resources.
 ## Backend
 
 All application packages live beneath `com.githubci.intelligence` so Spring
-Boot's default component scanning will find future implementations.
+Boot's default component scanning finds controllers, services, and configuration.
 
 | Package | Intended responsibility |
 | --- | --- |
@@ -18,8 +18,17 @@ Boot's default component scanning will find future implementations.
 | `configuration` | Spring beans and runtime configuration |
 | `exceptions` | Application exceptions and centralized HTTP error handling |
 
-These packages are empty intentionally. The only test verifies that the Spring
-application context starts without external services.
+`HealthController` delegates to `HealthService`, which produces a `HealthResponse`
+using the configured application name and an injectable UTC `Clock`.
+`GlobalExceptionHandler` maps MVC, validation, and unexpected failures to the
+`ApiError` JSON contract; unexpected failures are logged without exposing details.
+`WebConfiguration` provides the clock and an environment-configured CORS allowlist
+for `/api/**`. Local and production profiles configure CORS and Actuator exposure.
+Repository and model packages remain empty until persistence is needed.
+
+Tests cover the health contract with a fixed clock, JSON exception responses,
+Jakarta Bean Validation, full-context endpoint wiring, CORS, and production
+configuration without external services.
 
 ## Frontend
 

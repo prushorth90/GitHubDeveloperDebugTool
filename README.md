@@ -95,11 +95,51 @@ mvn -f backend/pom.xml spring-boot:run
 ```
 
 The server listens on `http://localhost:8080`; set `PORT` to change it.
-No custom endpoints exist, so requesting `/` returns HTTP 404 by design.
-Stop with Ctrl+C.
+Stop with Ctrl+C. Check the API with:
 
 ```sh
-# Compile, run the application-context smoke test, and package
+curl http://localhost:8080/api/health
+```
+
+```json
+{"status":"UP","service":"github-ci-intelligence","timestamp":"2026-10-17T03:00:00Z"}
+```
+
+The timestamp is the current UTC time. This endpoint reports application
+liveness, not the state of external services. Actuator also exposes
+`/actuator/health` without internal details; `/actuator/info` is available
+locally. Requesting `/` returns HTTP 404.
+
+API errors use a consistent JSON contract, for example:
+
+```json
+{"timestamp":"2026-10-17T03:00:00Z","status":404,"error":"Not Found","message":"Not Found","path":"/api/missing"}
+```
+
+Validation failures return 400. Unexpected failures return 500 with a generic
+message; details are logged on the server rather than exposed to clients.
+
+### Environment configuration
+
+- **Local (default):** `application-local.yaml` allows API access from
+  `http://localhost:5173` and `http://127.0.0.1:5173` (Vite), plus the same
+  hosts on port 3000 (Docker). CORS applies only to `/api/**`, without cookies
+  or credentialed requests.
+- **Production:** set `SPRING_PROFILES_ACTIVE=prod`. Only Actuator health is
+  exposed; graceful shutdown is enabled. No cross-origin access is allowed
+  unless `CORS_ALLOWED_ORIGINS` supplies a comma-separated list of exact
+  frontend origins. CORS is not authentication.
+- Both environments accept `PORT` (default `8080`) and
+  `CORS_ALLOWED_ORIGINS` to override the origin list.
+
+```sh
+SPRING_PROFILES_ACTIVE=prod \
+  CORS_ALLOWED_ORIGINS=https://app.example.com \
+  mvn -f backend/pom.xml spring-boot:run
+```
+
+```sh
+# Compile, run unit/configuration tests, and package
 mvn -f backend/pom.xml verify
 
 # Run the packaged application
@@ -115,8 +155,8 @@ npm run dev
 ```
 
 Open `http://localhost:5173` for the static Material UI starter page.
-The frontend does not call the backend yet; no proxy or CORS policy is
-configured before an API is defined.
+The frontend does not call the backend yet. The backend's local CORS policy
+allows it to call `http://localhost:8080/api/health` directly; no proxy is needed.
 
 ```sh
 npm run build --workspace frontend
@@ -163,7 +203,7 @@ docker compose -f docker/compose.yaml up --build
 
 Stop local servers using these ports before starting Compose. Docker builds
 use the repository root as their context, and the backend image build runs
-its smoke test. Source changes require an image rebuild; this is not a
+its backend tests. Source changes require an image rebuild; this is not a
 hot-reload setup.
 
 ```sh
