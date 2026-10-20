@@ -9,6 +9,8 @@ import ch.qos.logback.core.read.ListAppender;
 import com.githubci.intelligence.configuration.GitHubConfiguration;
 import com.githubci.intelligence.exceptions.GlobalExceptionHandler;
 import com.githubci.intelligence.services.GitHubService;
+import com.githubci.intelligence.services.FailureAnalyzerService;
+import com.githubci.intelligence.services.WorkflowRunAnalysisService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,7 +46,8 @@ class GitHubControllerTest {
         RestClient.Builder builder = new GitHubConfiguration().githubApiClient("https://api.github.com").mutate();
         server = MockRestServiceServer.bindTo(builder).build();
         GitHubService service = new GitHubService(builder.build(), RestClient.create(), "unit-test-token");
-        mvc = MockMvcBuilders.standaloneSetup(new GitHubController(service))
+        mvc = MockMvcBuilders.standaloneSetup(new GitHubController(service,
+                        new WorkflowRunAnalysisService(service, new FailureAnalyzerService())))
                 .setControllerAdvice(new GlobalExceptionHandler(Clock.systemUTC())).build();
     }
 

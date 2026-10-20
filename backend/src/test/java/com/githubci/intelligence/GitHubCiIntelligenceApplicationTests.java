@@ -14,6 +14,7 @@ import org.springframework.web.context.WebApplicationContext;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -51,6 +52,9 @@ class GitHubCiIntelligenceApplicationTests {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.message").value("GitHub integration requires GITHUB_TOKEN"));
         mvc.perform(get("/api/github/repositories/octo/demo/runs/42/jobs"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status").value(503));
+        mvc.perform(post("/api/github/repositories/octo/demo/runs/42/analyze"))
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.status").value(503));
         mvc.perform(get("/api/health")).andExpect(status().isOk());

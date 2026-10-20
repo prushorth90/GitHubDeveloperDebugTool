@@ -171,8 +171,9 @@ Without a token, health and other routes remain available; GitHub routes return
 | --- | --- |
 | `GET /api/github/repositories/{owner}/{repo}/workflows` | Workflow **runs**, not workflow definitions: `{"total_count":123,"workflow_runs":[...]}` |
 | `GET /api/github/repositories/{owner}/{repo}/runs/{runId}/jobs` | Jobs with nested steps: `{"total_count":5,"jobs":[...]}` |
+| `POST /api/github/repositories/{owner}/{repo}/runs/{runId}/analyze` | Synchronous failure analysis with repository, run ID and failed job results (see below) |
 
-Both endpoints accept `page` (default `1`, positive) and `per_page` (default
+Both GET endpoints accept `page` (default `1`, positive) and `per_page` (default
 `30`, range `1..100`). Each request fetches exactly one GitHub page, preserving
 `total_count`; request successive pages until all results are retrieved or the
 returned list is empty. Results are not cached or persisted and can change
@@ -187,7 +188,8 @@ curl 'http://localhost:8080/api/github/repositories/OWNER/REPO/runs/123/jobs?pag
 `GitHubService` additionally retrieves workflow definitions by workflow ID,
 individual run details, and plain-text logs by failed job ID. Log retrieval
 first checks for `failure` or `timed_out`; other conclusions return 409.
-These service methods do not yet have public HTTP endpoints. Log downloads
+The analysis endpoint uses failed-job logs internally; workflow details, run
+details and raw logs do not have separate public HTTP endpoints. Log downloads
 follow at most five redirects, validate **every** location, and use a separate
 unauthenticated client so no API token reaches storage. Only HTTPS on port
 443 (or the default port) is accepted, with no userinfo or fragments, for
@@ -225,11 +227,57 @@ real tokens or calls to GitHub.
 
 ### Local failure analysis
 
+Analyze a workflow run with an empty-body POST:
+
+```sh
+curl -X POST http://localhost:8080/api/github/repositories/OWNER/REPO/runs/123/analyze
+```
+
+The request synchronously retrieves all job pages (100 per page), selects jobs
+with `failure` or `timed_out` conclusions, downloads their logs and runs the
+existing analyzer and fingerprint service. It returns:
+
+```json
+{
+  "repository": "OWNER/REPO",
+  "runId": 123,
+  "failedJobs": [
+    {
+      "job": {"id": 7, "run_id": 123, "name": "Build", "conclusion": "failure"},
+      "logStatus": "AVAILABLE",
+      "logMessage": null,
+      "analysis": {
+        "category": "JAVA_COMPILATION",
+        "errorMessage": "[ERROR] /src/App.java:[12,4] cannot find symbol",
+        "confidence": "HIGH",
+        "suggestedInvestigation": "Inspect the compiler diagnostic and source location..."
+      }
+    }
+  ]
+}
+```
+
+The example abbreviates the job and analysis objects; each analysis includes all
+fields documented below, including evidence, context, normalized signature and
+the SHA-256 fingerprint. Each job retains its metadata and nested steps.
+Runs without failed jobs return HTTP 200 with an empty `failedJobs` list.
+Missing/expired logs (404/410), expired signed downloads and empty/blank logs
+produce a per-job `logStatus: "UNAVAILABLE"`, an explanatory `logMessage` and
+`analysis: null`; other jobs are still analyzed. No diagnosis or fingerprint is
+invented for missing logs.
+
+Invalid names/IDs and GitHub API errors use the error statuses above, including
+`Retry-After` for rate limits; they do not return a partial success. An incomplete
+jobs response also returns 502 rather than silently omitting jobs.
+The endpoint has no request body, queues, database writes or automatic retries.
+All work occurs in the HTTP request, so large runs can take time; this is
+intended for local development. Results and log-derived content are not persisted.
+
 `FailureAnalyzerService.analyze(String rawLogs)` accepts plain-text job logs and
 returns an immutable `FailureAnalysis` record. It is a Spring service but can also
 be constructed directly with `new FailureAnalyzerService()`; no Spring context,
 GitHub token, AWS credentials, network requests or paid AI APIs are required.
-It is not yet exposed through an HTTP endpoint or connected to the dashboard.
+It is used by the analysis endpoint but is not yet connected to the dashboard.
 
 The result contains:
 
@@ -264,6 +312,12 @@ Run the standalone analyzer tests locally:
 
 ```sh
 mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest,FailureFingerprintServiceTest test
+```
+
+Run the full-context endpoint integration tests with mocked GitHub HTTP responses:
+
+```sh
+mvn -f backend/pom.xml -Dtest=WorkflowRunAnalysisIntegrationTest test
 ```
 
 Evidence and context can contain sensitive raw log content; treat the result
