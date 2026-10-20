@@ -1,8 +1,8 @@
 # Architecture
 
-This repository provides a developer dashboard and backend health API with
-established component boundaries. It does not implement GitHub access, CI data
-ingestion, analysis, storage, or AWS resources.
+This repository provides a developer dashboard, backend health API, and GitHub
+Actions REST access with established component boundaries. It does not implement
+CI data ingestion, analysis, storage, end-user authentication, or AWS resources.
 
 ## Backend
 
@@ -27,9 +27,29 @@ using the configured application name and an injectable UTC `Clock`.
 for `/api/**`. Local and production profiles configure CORS and Actuator exposure.
 Repository and model packages remain empty until persistence is needed.
 
+`GitHubController` exposes paginated workflow runs and jobs beneath
+`/api/github/repositories/{owner}/{repo}`. `GitHubService` calls GitHub's official
+REST endpoints using an environment-provided token, with DTOs for repositories,
+workflow definitions, runs, jobs, and steps. Pagination is caller-driven with
+`page`, `per_page`, and GitHub's `total_count` envelope. The service also supports
+individual workflow/run details and failed-job logs without exposing additional
+HTTP routes. No GitHub data is persisted.
+
+`GitHubConfiguration` provides timeout-bounded `RestClient` instances with
+automatic redirects disabled. Authenticated API calls are restricted to
+GitHub.com; log downloads use an unauthenticated client and validate each HTTPS
+redirect against allowed GitHub Actions/storage hosts. Downloads have size and
+redirect limits. `GitHubException` carries sanitized errors and rate-limit retry
+metadata into `GlobalExceptionHandler`; upstream bodies, signed URLs, and
+transport exceptions are not logged. Missing tokens disable only GitHub access,
+not application startup or health. See the [API documentation](../README.md#github-actions-api)
+for error statuses, limits, and deployment access-control requirements.
+
 Tests cover the health contract with a fixed clock, JSON exception responses,
 Jakarta Bean Validation, full-context endpoint wiring, CORS, and production
-configuration without external services.
+configuration without external services. Mocked GitHub HTTP responses cover
+pagination, DTO mapping, authentication, permissions, rate limiting, log download
+safety, and transport failures without network access or real credentials.
 
 ## Frontend
 

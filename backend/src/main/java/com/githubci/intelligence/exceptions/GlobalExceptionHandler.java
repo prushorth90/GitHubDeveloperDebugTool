@@ -58,6 +58,16 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 "An unexpected error occurred", request);
     }
 
+    @ExceptionHandler(GitHubException.class)
+    public ResponseEntity<Object> handleGitHubException(GitHubException exception, WebRequest request) {
+        log.warn("GitHub request failed: status={}, message={}", exception.getStatus().value(), exception.getMessage());
+        HttpHeaders headers = new HttpHeaders();
+        if (exception.getRetryAfter() != null) {
+            headers.set(HttpHeaders.RETRY_AFTER, exception.getRetryAfter());
+        }
+        return error(exception.getStatus(), headers, exception.getMessage(), request);
+    }
+
     private ResponseEntity<Object> error(
             HttpStatusCode status, HttpHeaders headers, String message, WebRequest request) {
         String path = ((ServletWebRequest) request).getRequest().getRequestURI();

@@ -18,7 +18,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = "spring.profiles.active=local")
+@SpringBootTest(properties = {"spring.profiles.active=local", "github.token="})
 class GitHubCiIntelligenceApplicationTests {
 
     @Autowired
@@ -43,6 +43,17 @@ class GitHubCiIntelligenceApplicationTests {
                     Instant timestamp = Instant.parse(value);
                     assertTrue(!timestamp.isBefore(before) && !timestamp.isAfter(Instant.now()));
                 });
+    }
+
+    @Test
+    void githubRoutesAreWiredAndReportMissingTokenWithoutAffectingHealth() throws Exception {
+        mvc.perform(get("/api/github/repositories/octo/demo/workflows"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.message").value("GitHub integration requires GITHUB_TOKEN"));
+        mvc.perform(get("/api/github/repositories/octo/demo/runs/42/jobs"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status").value(503));
+        mvc.perform(get("/api/health")).andExpect(status().isOk());
     }
 
     @Test
