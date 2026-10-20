@@ -152,6 +152,103 @@ java -jar backend/target/github-ci-intelligence-backend.jar
 
 No persistence driver, JPA, Lombok, or authentication library is included.
 
+### GitHub workflow webhooks
+
+`POST /api/webhooks/github` receives GitHub `workflow_run` webhooks. Set
+`GITHUB_WEBHOOK_SECRET` in the **backend process environment** to the same
+high-entropy secret configured on the GitHub webhook. This is independent of
+`GITHUB_TOKEN`; no GitHub API token is needed to receive webhooks. The backend
+does not automatically load `.env` files for Maven runs. Docker Compose passes
+`GITHUB_WEBHOOK_SECRET` from its environment or the root `.env` file.
+
+The endpoint authenticates `X-Hub-Signature-256` with HMAC-SHA256 over the
+**original request bytes**, using a constant-time digest comparison, before
+parsing JSON or checking event type or duplicate delivery IDs. Never reformat
+or reserialize a payload before verifying it.
+
+- Only `X-GitHub-Event: workflow_run`, `action: completed`, and
+  `workflow_run.status: completed` are processed. All standard terminal
+  conclusions, including success, are accepted; this is not failure analysis.
+- Accepted, duplicate, and unrelated events return **204** with no body.
+  Unrelated event types are authenticated but do not need to be parsed.
+- Missing/invalid signatures return **401**; malformed signed workflow JSON,
+  required metadata, or delivery headers return **400**. Missing server secret
+  returns **503**, without disabling health or other API routes. Errors use
+  the existing `ApiError` contract and never include request bodies or secrets.
+- `WorkflowEvent` is a queue-ready DTO with `repository_id`, `repository_name`
+  (GitHub's `repository.full_name`, e.g. `octo/demo`), nullable `installation_id`,
+  `workflow_run_id`, `run_attempt`, `conclusion`, and `delivery_id`.
+  Positive numeric IDs and attempts are required. Installation may be absent.
+- Initially the backend only logs these validated, allowlisted metadata fields.
+  It does not retain payloads, store events, call GitHub, analyze runs, or send
+  anything to SQS. Repository names are log-safe; bodies, signatures, tokens,
+  branch names, commit messages, and other untrusted text are not logged.
+- A thread-safe, process-local cache retains **only delivery IDs and expiry
+  times**, for 24 hours, up to 10,000 IDs (oldest entries are evicted at capacity).
+  Repeated delivery IDs are acknowledged without logging twice. A new delivery
+  ID, including a rerun attempt, is processed independently. Restarting the
+  process, expiration, eviction, or multiple backend instances can allow repeats.
+  Durable, cross-instance idempotency must be added with future SQS integration.
+
+#### Test locally through an HTTPS tunnel
+
+1. Generate a high-entropy secret in a password manager and configure it through
+   your IDE's private environment or a secure terminal prompt. For example,
+   in macOS's default zsh, the following reads silently rather than putting
+   the value in shell history:
+
+   ```sh
+   read -rs 'GITHUB_WEBHOOK_SECRET?Webhook secret: '; echo
+   export GITHUB_WEBHOOK_SECRET
+   mvn -f backend/pom.xml spring-boot:run
+   ```
+
+   Do not use a literal secret in a command, commit it, paste it into chat,
+   put it in frontend/Vite configuration, or enable shell tracing (`set -x`).
+   Logs contain repository identifiers; keep local logs private as well.
+
+2. In another terminal, start an installed tunnel, for example:
+
+   ```sh
+   ngrok http 8080 --inspect=false
+   ```
+
+   Use its assigned **HTTPS** URL. Disable request inspection/retention and
+   avoid public request-bin or shared debugging services: the tunnel provider
+   can see webhook payloads. Prefer a disposable, non-sensitive test repository.
+   A tunnel to this port also exposes other backend routes; use a private test
+   environment, never a backend with privileged production credentials.
+
+3. In the test repository's **Settings > Webhooks > Add webhook**, set:
+   - Payload URL: `https://YOUR-TUNNEL-HOST/api/webhooks/github`
+   - Content type: `application/json`
+   - Secret: enter the same secret directly in GitHub's secret field
+   - SSL verification: enabled
+   - Events: select individual events and choose **Workflow runs**
+
+   A GitHub App webhook may also include `installation.id`; a repository
+   webhook can omit it. The initial signed `ping` should receive 204 without
+   creating a workflow metadata log entry.
+
+4. Run a small Actions workflow and wait for completion. In GitHub's **Recent
+   deliveries**, verify the completed `workflow_run` delivery received 204.
+   The backend should log one metadata line with its delivery ID, run ID,
+   attempt, and conclusion. Use **Redeliver** for the same delivery: it should
+   still receive 204, with no second metadata line while the ID is cached.
+   Non-completed workflow events should also receive 204 with no metadata log.
+   To check rejection, temporarily configure a different secret in the test
+   webhook, trigger an event, and verify 401; restore the matching secret.
+
+5. Stop the tunnel when finished, remove/disable the test webhook, and clear the
+   secret from the terminal with `unset GITHUB_WEBHOOK_SECRET`. Do not share
+   delivery payloads, request signatures, tunnel inspection captures, or secrets.
+
+Automated coverage (no tunnel or live GitHub credentials required):
+
+```sh
+mvn -f backend/pom.xml -Dtest=GitHubWebhookControllerTest test
+```
+
 ### GitHub Actions API
 
 Set `GITHUB_TOKEN` in the backend process environment (or supply it through your

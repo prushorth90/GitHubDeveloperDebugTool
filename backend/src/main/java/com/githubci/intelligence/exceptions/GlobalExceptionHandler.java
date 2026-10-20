@@ -68,6 +68,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return error(exception.getStatus(), headers, exception.getMessage(), request);
     }
 
+    @ExceptionHandler(WebhookException.class)
+    public ResponseEntity<Object> handleWebhookException(WebhookException exception, WebRequest request) {
+        log.warn("GitHub webhook rejected: status={}, message={}",
+                exception.getStatus().value(), exception.getMessage());
+        return error(exception.getStatus(), HttpHeaders.EMPTY, exception.getMessage(), request);
+    }
+
     private ResponseEntity<Object> error(
             HttpStatusCode status, HttpHeaders headers, String message, WebRequest request) {
         String path = ((ServletWebRequest) request).getRequest().getRequestURI();

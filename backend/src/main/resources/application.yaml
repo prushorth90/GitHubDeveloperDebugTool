@@ -26,3 +26,4 @@ app:
 github:
   token: ${GITHUB_TOKEN:}
   api-url: https://api.github.com
+  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}
