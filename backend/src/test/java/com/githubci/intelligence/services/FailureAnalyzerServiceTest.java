@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -201,6 +202,53 @@ class FailureAnalyzerServiceTest {
         assertEquals("Error: connect ECONNREFUSED", result.errorMessage());
         assertEquals(new LogEvidence(2, result.errorMessage()), result.evidence().getFirst());
         assertEquals(3, result.logContext().size());
+    }
+
+    @Test
+    void fingerprintsExtractedDiagnosticsRatherThanRawLogs() {
+        FailureAnalysis first = analyzer.analyze("""
+                2026-10-19T01:02:03Z Preparing first job
+                2026-10-19T01:02:04Z Error: Bad credentials
+                Completed in 12 seconds
+                """);
+        FailureAnalysis second = analyzer.analyze("""
+                2026-10-20T09:08:07Z Preparing another job
+                2026-10-20T09:08:08Z Error: Bad credentials
+                Completed in 99 seconds
+                """);
+        assertEquals("Error: Bad credentials", first.normalizedSignature());
+        assertEquals(first.normalizedSignature(), second.normalizedSignature());
+        assertEquals(first.fingerprint(), second.fingerprint());
+        assertNotEquals(first.fingerprint(),
+                analyzer.analyze("Error: Unable to resolve action `example/missing@v1`").fingerprint());
+        assertNotEquals(first.fingerprint(), analyzer.analyze("Error: token expired").fingerprint());
+    }
+
+    @Test
+    void fingerprintsEmbeddedTimestampsAndRetainsOriginalDiagnostic() {
+        FailureAnalysis first = analyzer.analyze("Error: timeout at 2026-10-19T01:02:03Z");
+        FailureAnalysis second = analyzer.analyze("Error: timeout at 2026-10-20T04:05:06Z");
+        assertEquals("Error: timeout at", first.normalizedSignature());
+        assertEquals(first.fingerprint(), second.fingerprint());
+        assertNotEquals(first.errorMessage(), second.errorMessage());
+    }
+
+    @Test
+    void includesAllConflictingDiagnosticsButNotSurroundingContextInFingerprint() {
+        String compiler = "[ERROR] /app/App.java:[8,3] cannot find symbol\n";
+        FailureAnalysis first = analyzer.analyze(compiler + "Error: Bad credentials");
+        FailureAnalysis second = analyzer.analyze(compiler + "Error: token expired");
+        assertEquals(first.category(), second.category());
+        assertEquals(first.errorMessage(), second.errorMessage());
+        assertNotEquals(first.fingerprint(), second.fingerprint());
+    }
+
+    @Test
+    void fingerprintsUnknownAndEmptyLogsExplicitly() {
+        FailureAnalysis empty = analyzer.analyze("");
+        assertEquals("No recognizable failure diagnostic found.", empty.normalizedSignature());
+        assertEquals(empty.fingerprint(), analyzer.analyze("Build successful").fingerprint());
+        assertNotEquals(empty.fingerprint(), analyzer.analyze("Error: unrecognized issue").fingerprint());
     }
 
     @Test

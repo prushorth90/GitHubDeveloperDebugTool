@@ -238,6 +238,8 @@ The result contains:
   `GITHUB_ACTIONS_CONFIGURATION`, or `UNKNOWN`.
 - `errorMessage`: the observed diagnostic, not an invented explanation. Logs
   without a recognizable diagnostic receive an explicit absence message.
+- `normalizedSignature` and `fingerprint`: normalized selected diagnostic evidence
+  and its stable, lowercase, 64-character SHA-256 hash (see below).
 - `suspectedCause` and `suggestedInvestigation`: hypotheses and next checks,
   **not** confirmed root causes.
 - `confidence`: `HIGH` for specific diagnostics, `MEDIUM` for build/phase
@@ -261,11 +263,53 @@ unrecognized logs return low-confidence `UNKNOWN` results.
 Run the standalone analyzer tests locally:
 
 ```sh
-mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest test
+mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest,FailureFingerprintServiceTest test
 ```
 
 Evidence and context can contain sensitive raw log content; treat the result
 with the same access controls as the source logs and do not log it automatically.
+
+#### Failure fingerprints
+
+`FailureFingerprintService` hashes UTF-8 bytes of
+`v1\n<CATEGORY_NAME>\n<normalizedSignature>`. The version prefix reserves a
+normalization namespace; future rule changes must bump it rather than silently
+mix incompatible fingerprints. It uses only extracted diagnostic evidence
+(including corroborating evidence or all conflicting category diagnostics),
+not the full raw log, line numbers, surrounding context or investigation advice.
+Original diagnostics and evidence are unchanged.
+
+Normalization removes ANSI colors and ISO-style date/time values (including
+fractional seconds and timezone offsets), collapses whitespace, and substitutes
+UUIDs and numeric/hexadecimal generated request, correlation, trace, span, run
+and build IDs when explicitly labeled with `id`. Temporary paths under Unix
+`/tmp`, `/private/tmp`, `/var/tmp`, macOS `/var/folders/.../T` or `C`, and standard
+Windows temporary directories become `<tmp>/<filename>`; long numeric/hex file
+suffixes are replaced, while meaningful filenames are retained. Java generated
+lambda identifiers are replaced too. Loopback ports in the dynamic range
+49152–65535 and explicitly labeled ephemeral ports are normalized. Other ports,
+remote hosts, artifact coordinates/versions, exception names, source locations,
+assertion values, status/exit codes and unlabeled numbers remain significant.
+This deliberately favors missed matches over indiscriminate numeric replacement.
+Unrecognized date formats, ID schemes and temporary roots are left unchanged.
+
+Fingerprints are **candidate grouping keys, not proof of a shared root cause**.
+Different problems can share a generic wrapper, test summary or compiler
+diagnostic, especially when the missing symbol or underlying exception appears
+only in surrounding context. Removing a timestamp, UUID, temporary directory
+or dynamic port can also hide the cause when that value itself is faulty.
+All logs without a recognizable diagnostic share the explicit absence signature
+and `UNKNOWN` fingerprint; this is not a diagnosed failure group.
+
+No grouping store or automatic remediation is implemented. Consumers should
+compare category and normalized signature after hash lookup: equal hashes with
+different signatures/categories indicate a hash collision and must remain
+separate. SHA-256 collisions are extremely unlikely, but this comparison avoids
+relying on that assumption alone. Over-normalization produces the **same**
+signature, so hash comparison cannot detect it; inspect retained raw evidence,
+context and confidence before merging incidents or acting automatically. Refine
+and version the rules when a false match is discovered. Normalization is not
+secret redaction; the signature may still contain sensitive values.
 
 ## Run the frontend
 

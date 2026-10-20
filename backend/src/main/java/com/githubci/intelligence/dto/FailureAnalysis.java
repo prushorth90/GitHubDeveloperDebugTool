@@ -9,7 +9,9 @@ public record FailureAnalysis(
         String suggestedInvestigation,
         ConfidenceLevel confidence,
         List<LogEvidence> evidence,
-        List<LogEvidence> logContext) {
+        List<LogEvidence> logContext,
+        String normalizedSignature,
+        String fingerprint) {
 
     public FailureAnalysis {
         evidence = List.copyOf(evidence);

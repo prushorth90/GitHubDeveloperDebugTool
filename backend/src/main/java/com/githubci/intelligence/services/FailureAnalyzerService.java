@@ -5,11 +5,13 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import com.githubci.intelligence.dto.ConfidenceLevel;
 import com.githubci.intelligence.dto.FailureAnalysis;
 import com.githubci.intelligence.dto.FailureCategory;
 import com.githubci.intelligence.dto.LogEvidence;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import static com.githubci.intelligence.dto.ConfidenceLevel.HIGH;
@@ -26,6 +28,17 @@ import static com.githubci.intelligence.dto.FailureCategory.UNKNOWN;
 
 @Service
 public class FailureAnalyzerService {
+
+    private final FailureFingerprintService fingerprintService;
+
+    public FailureAnalyzerService() {
+        this(new FailureFingerprintService());
+    }
+
+    @Autowired
+    public FailureAnalyzerService(FailureFingerprintService fingerprintService) {
+        this.fingerprintService = fingerprintService;
+    }
 
     private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-?]*[ -/]*[@-~]");
     private static final Pattern TIMESTAMP = Pattern.compile(
@@ -158,25 +171,35 @@ public class FailureAnalyzerService {
         if (strongest.size() == 1) {
             Match match = strongest.getFirst();
             Rule rule = match.rule();
-            return new FailureAnalysis(rule.category(), lines.get(match.index()), rule.cause(),
+            return analysis(rule.category(), lines.get(match.index()), rule.cause(),
                     rule.investigation(), rule.confidence(), evidence(lines, match.evidenceIndices()),
                     context(lines, List.of(match.index())));
         }
         if (strongest.size() > 1) {
             List<Integer> indices = strongest.stream().map(Match::index).sorted().toList();
-            return new FailureAnalysis(UNKNOWN, lines.get(indices.getFirst()),
+            return analysis(UNKNOWN, lines.get(indices.getFirst()),
                     "Multiple failure categories have supporting diagnostics; a single cause cannot be established.",
                     "Inspect the separate diagnostics and step boundaries to determine which failure occurred first "
                             + "and whether later errors are consequences.",
                     LOW, evidence(lines, indices), context(lines, indices));
         }
         List<Integer> indices = firstError < 0 ? List.of() : List.of(firstError);
-        return new FailureAnalysis(UNKNOWN,
+        return analysis(UNKNOWN,
                 firstError < 0 ? "No recognizable failure diagnostic found." : lines.get(firstError),
                 "The available log evidence does not establish a supported failure category.",
                 "Inspect the failed step and preceding output, obtain fuller logs if needed, and verify "
                         + "the actual target of any network error before attributing it to a database.",
                 LOW, evidence(lines, indices), context(lines, indices));
+    }
+
+    private FailureAnalysis analysis(FailureCategory category, String errorMessage, String suspectedCause,
+            String suggestedInvestigation, ConfidenceLevel confidence, List<LogEvidence> evidence,
+            List<LogEvidence> logContext) {
+        String signature = evidence.isEmpty() ? errorMessage
+                : evidence.stream().map(LogEvidence::text).collect(Collectors.joining("\n"));
+        FailureFingerprintService.Fingerprint fingerprint = fingerprintService.fingerprint(category, signature);
+        return new FailureAnalysis(category, errorMessage, suspectedCause, suggestedInvestigation, confidence,
+                evidence, logContext, fingerprint.normalizedSignature(), fingerprint.fingerprint());
     }
 
     private Match match(List<String> lines, int index) {
