@@ -195,6 +195,7 @@ public class FailureAnalyzerService {
     private FailureAnalysis analysis(FailureCategory category, String errorMessage, String suspectedCause,
             String suggestedInvestigation, ConfidenceLevel confidence, List<LogEvidence> evidence,
             List<LogEvidence> logContext) {
+        errorMessage = excerpt(errorMessage);
         String signature = evidence.isEmpty() ? errorMessage
                 : evidence.stream().map(LogEvidence::text).collect(Collectors.joining("\n"));
         FailureFingerprintService.Fingerprint fingerprint = fingerprintService.fingerprint(category, signature);
@@ -241,7 +242,11 @@ public class FailureAnalyzerService {
 
     private List<LogEvidence> evidence(List<String> lines, List<Integer> indices) {
         return indices.stream().distinct().sorted()
-                .map(index -> new LogEvidence(index + 1, lines.get(index))).toList();
+                .map(index -> new LogEvidence(index + 1, excerpt(lines.get(index)))).toList();
+    }
+
+    private static String excerpt(String line) {
+        return line.length() <= 2000 ? line : line.substring(0, 2000) + " [truncated]";
     }
 
     private List<LogEvidence> context(List<String> lines, List<Integer> centers) {

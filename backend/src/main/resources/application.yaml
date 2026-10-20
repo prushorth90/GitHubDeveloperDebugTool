@@ -20,6 +20,11 @@ management:
       show-details: never
 
 app:
+  s3:
+    endpoint: ${S3_ENDPOINT:}
+    region: ${AWS_REGION:us-east-1}
+    bucket-name: ${S3_LOG_BUCKET:github-ci-logs}
+    path-style-access: ${S3_PATH_STYLE_ACCESS:false}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}
   dynamodb:

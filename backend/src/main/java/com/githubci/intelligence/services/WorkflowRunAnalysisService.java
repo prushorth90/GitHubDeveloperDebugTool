@@ -26,12 +26,17 @@ public class WorkflowRunAnalysisService {
     private final GitHubService github;
     private final FailureAnalyzerService analyzer;
     private final WorkflowAnalysisRepository repository;
+    private final LogStorageService logStorage;
+    private final LogRedactionService redactor;
 
     public WorkflowRunAnalysisService(
-            GitHubService github, FailureAnalyzerService analyzer, WorkflowAnalysisRepository repository) {
+            GitHubService github, FailureAnalyzerService analyzer, WorkflowAnalysisRepository repository,
+            LogStorageService logStorage, LogRedactionService redactor) {
         this.github = github;
         this.analyzer = analyzer;
         this.repository = repository;
+        this.logStorage = logStorage;
+        this.redactor = redactor;
     }
 
     public WorkflowRunAnalysis analyze(String owner, String repo, long runId) {
@@ -42,12 +47,15 @@ public class WorkflowRunAnalysisService {
         if (!"completed".equals(run.status())) {
             throw new GitHubException(HttpStatus.CONFLICT, "Workflow run must be completed before analysis");
         }
+        if (run.repository() == null || run.repository().id() <= 0) {
+            throw new GitHubException(HttpStatus.BAD_GATEWAY, "GitHub returned invalid repository metadata");
+        }
         var claim = repository.claim(owner + "/" + repo, run);
         if (claim.completed()) {
             return claim.record().analysis();
         }
         try {
-            WorkflowRunAnalysis result = analyzeAttempt(owner, repo, runId, run.runAttempt());
+            WorkflowRunAnalysis result = analyzeAttempt(owner, repo, run);
             repository.complete(claim, result);
             return result;
         } catch (RuntimeException failure) {
@@ -64,7 +72,9 @@ public class WorkflowRunAnalysisService {
         }
     }
 
-    private WorkflowRunAnalysis analyzeAttempt(String owner, String repo, long runId, int attempt) {
+    private WorkflowRunAnalysis analyzeAttempt(String owner, String repo, GitHubWorkflowRun run) {
+        long runId = run.id();
+        int attempt = run.runAttempt();
         List<FailedJobAnalysis> failures = new ArrayList<>();
         long retrieved = 0;
         for (int page = 1; ; page++) {
@@ -74,7 +84,7 @@ public class WorkflowRunAnalysisService {
                     throw new GitHubException(HttpStatus.BAD_GATEWAY, "GitHub returned an invalid job");
                 }
                 if ("failure".equals(job.conclusion()) || "timed_out".equals(job.conclusion())) {
-                    failures.add(analyzeJob(owner, repo, job));
+                    failures.add(analyzeJob(owner, repo, run, job));
                 }
             }
             retrieved += jobs.jobs().size();
@@ -88,7 +98,7 @@ public class WorkflowRunAnalysisService {
         return new WorkflowRunAnalysis(owner + "/" + repo, runId, failures);
     }
 
-    private FailedJobAnalysis analyzeJob(String owner, String repo, GitHubJob job) {
+    private FailedJobAnalysis analyzeJob(String owner, String repo, GitHubWorkflowRun run, GitHubJob job) {
         String logs;
         try {
             logs = github.getFailedJobLogs(owner, repo, job.id());
@@ -96,11 +106,13 @@ public class WorkflowRunAnalysisService {
             if (exception.getStatus() != HttpStatus.GONE) {
                 throw exception;
             }
-            return new FailedJobAnalysis(job, UNAVAILABLE, exception.getMessage(), null);
+            return new FailedJobAnalysis(job, UNAVAILABLE, exception.getMessage(), null, null);
         }
         if (logs.isBlank()) {
-            return new FailedJobAnalysis(job, UNAVAILABLE, "GitHub job logs are empty", null);
+            return new FailedJobAnalysis(job, UNAVAILABLE, "GitHub job logs are empty", null, null);
         }
-        return new FailedJobAnalysis(job, AVAILABLE, null, analyzer.analyze(logs));
+        String sanitized = redactor.redact(logs);
+        String objectKey = logStorage.upload(run.repository().id(), run.id(), run.runAttempt(), job.id(), sanitized);
+        return new FailedJobAnalysis(job, AVAILABLE, null, analyzer.analyze(sanitized), objectKey);
     }
 }

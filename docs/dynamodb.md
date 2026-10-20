@@ -25,8 +25,9 @@ Maven does not automatically read `.env`.
 ### Development
 
 ```sh
-docker compose up -d dynamodb-local
+docker compose up -d dynamodb-local localstack
 docker compose run --rm dynamodb-init
+docker compose run --rm s3-init
 export DYNAMODB_ENDPOINT=http://localhost:8000
 export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local
 mvn -f backend/pom.xml spring-boot:run
@@ -48,7 +49,7 @@ removing the database volume intentionally deletes development records.
 ### Production
 
 Provision the following schema through your deployment tooling before starting
-the backend; the CDK stack does not yet provision AWS resources. Use
+the backend; the CDK stack provisions the S3 log bucket, not the table. Use
 `PAY_PER_REQUEST`, string attributes `pk`, `sk`, `failurePk`, `failureSk`, a
 table key of `pk` (HASH) / `sk` (RANGE), and the `recent-failures` GSI described
 below. The development script contains the equivalent `create-table` definition,
@@ -63,8 +64,13 @@ permissions. Configure encryption, backup/retention and access controls to suit
 your deployment. Compose deliberately targets Local, even with the Spring `prod`
 profile; deploy the backend separately for real AWS.
 
-Analysis evidence may contain sensitive source/log excerpts. Full logs are not
-stored, but selected evidence, context, signatures and suggestions are. Protect
+Analysis evidence may contain sensitive source/log excerpts. Full logs are stored
+only as sanitized gzip objects in S3, referenced by `logObjectKey` in each
+available failed-job analysis. Recognized credentials are redacted before
+analysis/upload, and evidence lines are bounded to 2,000 characters plus a
+truncation marker. Selected evidence, context, signatures and suggestions remain
+in DynamoDB. See [S3 configuration and retention](../README.md#s3-job-log-storage).
+Protect
 the table and API accordingly; end-user authentication/authorization is not
 provided by this change. Never expose the developer backend publicly without
 an access-control boundary.

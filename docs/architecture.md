@@ -2,8 +2,8 @@
 
 This repository provides a developer dashboard, backend health API, and GitHub
 Actions REST access and standalone deterministic failure analysis with established
-component boundaries and DynamoDB analysis persistence. It does not implement automated CI data ingestion,
-end-user authentication, or AWS resources.
+component boundaries, DynamoDB analysis persistence, and S3 job log storage.
+It does not implement automated CI data ingestion or end-user authentication.
 
 ## Backend
 
@@ -66,6 +66,15 @@ evidence, not merely a generic network error. Analysis is wired to the synchrono
 HTTP analysis route, but not the frontend. See [local failure analysis](../README.md#local-failure-analysis)
 for the categories, confidence semantics and local test command.
 
+`LogStorageService` stores sanitized UTF-8 gzip logs through AWS SDK for Java v2.
+Keys include repository ID, run ID, attempt and job ID; DynamoDB stores the key
+with bounded analysis excerpts rather than full logs. `LogRedactionService`
+runs before analysis and storage to remove common credentials and authentication
+headers. Storage failures prevent completion and preserve the existing retry
+semantics. Retrieval and deletion are backend service operations, not public
+HTTP endpoints. Local development uses LocalStack, and storage unit tests mock
+the SDK client. See [S3 configuration and retention](../README.md#s3-job-log-storage).
+
 Tests cover the health contract with a fixed clock, JSON exception responses,
 Jakarta Bean Validation, full-context endpoint wiring, CORS, and production
 configuration without external services. Mocked GitHub HTTP responses cover
@@ -75,6 +84,8 @@ Standalone analyzer tests cover each category, evidence extraction, wrapper
 precedence, ambiguous diagnostics and network-error false-positive protection.
 Repository integration tests use Testcontainers with real DynamoDB Local to
 verify serialization, queries, conditional claims, retries and stale-worker fencing.
+S3 integration tests use Testcontainers with LocalStack for upload, retrieval,
+overwrite and deletion without real AWS resources.
 
 ## Frontend
 
@@ -104,11 +115,12 @@ selectors do not make API requests. No component test framework is configured.
 
 ## Infrastructure and operations
 
-[The CDK app](../infrastructure/bin/github-ci-intelligence.ts) creates an empty,
-environment-agnostic stack. Add resource definitions under
-[`infrastructure/lib`](../infrastructure/lib) only when deployment requirements
-are established. Compiled JavaScript and synthesized templates are generated
-artifacts, not source files.
+[The CDK app](../infrastructure/bin/github-ci-intelligence.ts) creates an
+environment-agnostic stack with a private, encrypted, TLS-only S3 log bucket.
+Its lifecycle expires logs after 30 days and aborts incomplete uploads after one
+day; versioning is disabled. The bucket is retained on stack removal. Deployment
+must separately provide the backend role and DynamoDB table.
+Compiled JavaScript and synthesized templates are generated artifacts, not source files.
 
 [`docker`](../docker) holds multistage frontend and backend Dockerfiles, dedicated
 build-context ignore files, and Nginx configuration.

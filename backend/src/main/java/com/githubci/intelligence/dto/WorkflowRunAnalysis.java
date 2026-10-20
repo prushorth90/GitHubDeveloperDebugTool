@@ -9,7 +9,7 @@ public record WorkflowRunAnalysis(String repository, long runId, List<FailedJobA
     }
 
     public record FailedJobAnalysis(
-            GitHubJob job, LogStatus logStatus, String logMessage, FailureAnalysis analysis) {
+            GitHubJob job, LogStatus logStatus, String logMessage, FailureAnalysis analysis, String logObjectKey) {
     }
 
     public enum LogStatus {

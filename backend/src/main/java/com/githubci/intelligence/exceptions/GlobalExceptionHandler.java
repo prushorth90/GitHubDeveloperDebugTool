@@ -83,6 +83,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return error(HttpStatus.CONFLICT, headers, exception.getMessage(), request);
     }
 
+    @ExceptionHandler(LogStorageException.class)
+    public ResponseEntity<Object> handleLogStorageException(LogStorageException exception, WebRequest request) {
+        log.warn("Job log storage failed: status={}, message={}",
+                exception.getStatus().value(), exception.getMessage());
+        return error(exception.getStatus(), HttpHeaders.EMPTY, exception.getMessage(), request);
+    }
+
     private ResponseEntity<Object> error(
             HttpStatusCode status, HttpHeaders headers, String message, WebRequest request) {
         String path = ((ServletWebRequest) request).getRequest().getRequestURI();

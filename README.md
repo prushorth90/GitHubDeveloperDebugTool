@@ -2,15 +2,16 @@
 
 A full-stack developer tool with a GitHub Actions REST integration and developer
 dashboard and a deterministic CI failure analyzer. Workflow analyses are persisted
-in Amazon DynamoDB. End-user authentication is not implemented.
+in Amazon DynamoDB; sanitized, compressed job logs are stored in Amazon S3.
+End-user authentication is not implemented.
 
 ## Technology
 
 - **Backend:** Java 21, Spring Boot 4.1.1, Maven.
-- **Persistence:** AWS SDK for Java v2, DynamoDB Enhanced Client, DynamoDB Local.
+- **Persistence:** AWS SDK for Java v2, DynamoDB Enhanced Client, S3, DynamoDB Local and LocalStack.
 - **Frontend:** React 19, TypeScript 5.9, Vite 8, Material UI 9 with Emotion,
   React Router, TanStack Query, and Axios.
-- **Infrastructure:** AWS CDK v2 in TypeScript, with an empty, environment-agnostic stack.
+- **Infrastructure:** AWS CDK v2 in TypeScript, with a private, encrypted S3 log bucket.
 - **Tooling:** npm workspaces, Docker Compose, GitHub Actions.
 
 Direct npm dependencies are pinned and the root `package-lock.json` locks the
@@ -81,7 +82,7 @@ Unused source folders contain `.gitkeep` files so Git preserves them. See
   and npm **10+**. `.nvmrc` selects Node 22.
 - Docker with Compose v2, for DynamoDB Local and repository integration tests.
 - AWS credentials and an AWS account are **not** needed to synthesize the
-  current empty stack. They will be needed for future deployments.
+  stack or use local emulators. Deployment requires an AWS account.
 
 All commands below run from the repository root unless stated otherwise.
 
@@ -99,8 +100,9 @@ Start and initialize the local database, then export the backend environment
 (Maven does not automatically load `.env`):
 
 ```sh
-docker compose up -d dynamodb-local
+docker compose up -d dynamodb-local localstack
 docker compose run --rm dynamodb-init
+docker compose run --rm s3-init
 export DYNAMODB_ENDPOINT=http://localhost:8000
 export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local
 ```
@@ -165,6 +167,77 @@ DynamoDB configuration, table schema, access patterns, processing leases,
 production setup, and integration test commands are documented in
 [DynamoDB persistence](docs/dynamodb.md). No JPA, Lombok, or authentication library
 is included.
+
+### S3 job log storage
+
+`LogStorageService.upload(repositoryId, runId, attempt, jobId, logs)` redacts
+logs, encodes UTF-8, compresses with gzip, and returns a deterministic key:
+
+```text
+logs/repositories/<repository-id>/runs/<run-id>/attempts/<attempt>/jobs/<job-id>.log.gz
+```
+
+Only failed/timed-out jobs with nonempty available logs are uploaded. Redaction
+also runs **before analysis**, so persisted evidence/signatures do not retain
+recognized credentials. DynamoDB contains `logObjectKey` references and bounded
+analysis excerpts, never full log contents. Each excerpt line is capped at 2,000
+characters (with an explicit truncation marker); the full sanitized log stays in
+S3. Existing records without a key remain readable; there is no automatic
+backfill. Re-uploading the same job/attempt overwrites the same object.
+
+`retrieve(key)` downloads and decompresses UTF-8 logs, applying redaction again.
+`delete(key)` is idempotent for missing objects. Both accept only managed log
+keys, not arbitrary bucket paths. These are backend service methods, not new
+public download/delete endpoints. Expired/missing objects produce an explicit
+410 storage exception; storage/permission/network failures produce 503, invalid
+gzip produces 502. Upload failures prevent analysis completion and leave it
+retryable. A database failure after upload can leave an unreferenced object;
+retry overwrites it, and lifecycle expiration eventually removes it. Completed
+cached analyses can still reference logs that have expired.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `S3_LOG_BUCKET` | `github-ci-logs` | Pre-provisioned bucket |
+| `S3_ENDPOINT` | local: `http://localhost:4566`; prod: unset | Emulator endpoint; omit for AWS |
+| `S3_PATH_STYLE_ACCESS` | local: `true`; prod: `false` | Path-style addressing for emulators |
+| `AWS_REGION` | `us-east-1` | S3 and DynamoDB region |
+
+The SDK uses the standard credential provider chain, shared with DynamoDB;
+there are no embedded real credentials or Java dummy-credential fallbacks.
+The local commands above initialize LocalStack using dummy environment
+credentials, with no real AWS resources. Compose supplies its internal S3
+endpoint and dummy credentials even under the `prod` Spring profile. LocalStack
+data uses a named volume; it is development storage, not a backup guarantee.
+Unit tests mock `S3Client` and require neither Docker nor AWS.
+
+For deployment, the CDK stack provisions an SSL-only, public-access-blocked,
+SSE-S3 encrypted bucket. Its enabled lifecycle rule expires `logs/` objects
+**30 days after creation**, and aborts incomplete multipart uploads after one
+day. Versioning is disabled so expiration does not leave retained noncurrent
+log versions. AWS lifecycle deletion is asynchronous, not an exact 30-day
+deadline; re-upload resets object age. The bucket is retained when the stack
+is removed. Configure the backend with `SPRING_PROFILES_ACTIVE=prod`,
+`S3_LOG_BUCKET=<LogBucketName output>`, and no endpoint override. Grant its
+workload role only `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on
+`arn:aws:s3:::<bucket>/logs/*`; no bucket-creation permission is needed. Startup
+never creates buckets or changes lifecycle rules. The stack does not yet deploy
+the backend or provision its IAM role/DynamoDB table.
+
+Redaction covers authentication/cookie/API-key headers, common secret
+assignments, URL credentials/signed queries, GitHub/AWS/Slack/JWT tokens,
+private keys, and the configured GitHub token/webhook secret. It is
+best-effort, not proof that arbitrary logs are secret-free: custom encodings,
+unknown formats or unlabelled values may evade it. Keep GitHub's secret
+masking enabled, never print secrets, and protect both storage and the API
+behind an access-control boundary. No raw logs, signed URLs, authentication
+headers or SDK exception messages are logged by storage operations.
+
+```sh
+# S3 unit tests (no Docker/AWS)
+mvn -f backend/pom.xml -Dtest=LogStorageServiceTest,LogRedactionServiceTest,WorkflowRunAnalysisIntegrationTest test
+# LocalStack round-trip integration test (Docker required)
+mvn -f backend/pom.xml -DskipTests=false -Dit.test=LogStorageServiceIT verify
+```
 
 ### GitHub workflow webhooks
 
@@ -387,8 +460,9 @@ reuses a completed result; an active claim returns 409 with `Retry-After`.
 Failed or expired processing can be retried safely. GitHub metadata is still
 fetched on cache hits to enforce the existing upstream access checks.
 Non-completed runs return 409. All work occurs in the HTTP request, so large
-runs can take time. Results and selected log-derived evidence are persisted;
-full raw logs are not. See [persistence limits and access patterns](docs/dynamodb.md).
+runs can take time. Results and selected sanitized log-derived evidence are
+persisted in DynamoDB; full sanitized logs are gzip objects in S3, referenced
+by `logObjectKey`. See [persistence limits and access patterns](docs/dynamodb.md).
 
 `FailureAnalyzerService.analyze(String rawLogs)` accepts plain-text job logs and
 returns an immutable `FailureAnalysis` record. It is a Spring service but can also
@@ -526,13 +600,12 @@ npm run infra:synth
 ```
 
 Synthesis compiles TypeScript and writes CloudFormation artifacts under
-`infrastructure/cdk.out/`. The stack deliberately contains **no AWS resources**;
-there is nothing to deploy at this stage. Lookups are disabled during synthesis
-so it can run without AWS access. A global CDK installation is not required.
-CDK may emit a template-validation warning because CloudFormation requires a
-non-empty `Resources` section for deployment; this is expected for this scaffold.
+`infrastructure/cdk.out/`. The stack defines the private S3 job log bucket,
+its TLS-only bucket policy and 30-day expiration rule. Lookups are disabled
+during synthesis so it can run without AWS access. A global CDK installation
+is not required.
 
-For future resource-bearing stacks, the workspace also provides:
+To review or deploy the bucket, the workspace also provides:
 
 ```sh
 npm run diff --workspace infrastructure

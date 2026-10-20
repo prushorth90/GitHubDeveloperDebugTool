@@ -13,6 +13,7 @@ import java.util.concurrent.Executors;
 
 import com.githubci.intelligence.dto.GitHubJob;
 import com.githubci.intelligence.dto.GitHubJobs;
+import com.githubci.intelligence.dto.GitHubRepository;
 import com.githubci.intelligence.dto.GitHubWorkflowRun;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis.FailedJobAnalysis;
@@ -22,6 +23,8 @@ import com.githubci.intelligence.exceptions.GitHubException;
 import com.githubci.intelligence.models.AnalysisStatus;
 import com.githubci.intelligence.services.FailureAnalyzerService;
 import com.githubci.intelligence.services.GitHubService;
+import com.githubci.intelligence.services.LogRedactionService;
+import com.githubci.intelligence.services.LogStorageService;
 import com.githubci.intelligence.services.WorkflowRunAnalysisService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -240,7 +243,7 @@ class WorkflowAnalysisRepositoryIT {
     void unavailableLogsArePersistedAsFailuresWithoutInventingFingerprints() {
         var job = job(42);
         var result = new WorkflowRunAnalysis(REPOSITORY, 42,
-                List.of(new FailedJobAnalysis(job, LogStatus.UNAVAILABLE, "Logs expired", null)));
+                List.of(new FailedJobAnalysis(job, LogStatus.UNAVAILABLE, "Logs expired", null, null)));
         repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), result);
         assertEquals(result, repository.findRun(REPOSITORY, 42, 1).orElseThrow().analysis());
         assertEquals(1, repository.recentFailures(REPOSITORY, 10).size());
@@ -251,7 +254,7 @@ class WorkflowAnalysisRepositoryIT {
         var claim = repository.claim(REPOSITORY, run(42, 1, NOW));
         assertThrows(IllegalArgumentException.class, () -> repository.complete(claim, failure(99)));
         var oversized = new WorkflowRunAnalysis(REPOSITORY, 42, List.of(new FailedJobAnalysis(
-                job(42), LogStatus.UNAVAILABLE, "x".repeat(351 * 1024), null)));
+                job(42), LogStatus.UNAVAILABLE, "x".repeat(351 * 1024), null, null)));
         assertThrows(IllegalArgumentException.class, () -> repository.complete(claim, oversized));
         assertEquals(AnalysisStatus.PROCESSING, repository.findRun(REPOSITORY, 42, 1).orElseThrow().status());
         assertTrue(repository.fail(claim));
@@ -283,7 +286,11 @@ class WorkflowAnalysisRepositoryIT {
         when(github.listJobsForAttempt("octo", "demo", 42, 1, 1, 100))
                 .thenReturn(new GitHubJobs(1, List.of(job(42))));
         when(github.getFailedJobLogs("octo", "demo", 7)).thenReturn("cannot find symbol");
-        var service = new WorkflowRunAnalysisService(github, ANALYZER, repository);
+        var storage = mock(LogStorageService.class);
+        when(storage.upload(1, 42, 1, 7, "cannot find symbol"))
+                .thenReturn(LogStorageService.objectKey(1, 42, 1, 7));
+        var service = new WorkflowRunAnalysisService(github, ANALYZER, repository,
+                storage, new LogRedactionService("", ""));
         var result = service.analyze("octo", "demo", 42);
         assertEquals(result, service.analyze("octo", "demo", 42));
         assertEquals(result, repository.findRun(REPOSITORY, 42, 1).orElseThrow().analysis());
@@ -299,7 +306,8 @@ class WorkflowAnalysisRepositoryIT {
         var upstream = new GitHubException(HttpStatus.TOO_MANY_REQUESTS, "Rate limit exceeded");
         when(github.listJobsForAttempt("octo", "demo", 42, 1, 1, 100))
                 .thenThrow(upstream).thenReturn(new GitHubJobs(0, List.of()));
-        var service = new WorkflowRunAnalysisService(github, ANALYZER, repository);
+        var service = new WorkflowRunAnalysisService(github, ANALYZER, repository,
+                mock(LogStorageService.class), new LogRedactionService("", ""));
         assertEquals(upstream, assertThrows(GitHubException.class, () -> service.analyze("octo", "demo", 42)));
         assertEquals(AnalysisStatus.FAILED, repository.findRun(REPOSITORY, 42, 1).orElseThrow().status());
         assertEquals(empty(42), service.analyze("octo", "demo", 42));
@@ -314,7 +322,8 @@ class WorkflowAnalysisRepositoryIT {
     private GitHubWorkflowRun run(long id, int attempt, Instant occurredAt) {
         return new GitHubWorkflowRun(id, "CI", 3, id, attempt, "push", "completed", "failure",
                 "main", "abc123", "https://github.com/" + REPOSITORY + "/actions/runs/" + id,
-                occurredAt, occurredAt.plusSeconds(10), null);
+                occurredAt, occurredAt.plusSeconds(10),
+                new GitHubRepository(1, "demo", REPOSITORY, "https://github.com/" + REPOSITORY, true));
     }
 
     private GitHubJob job(long runId) {
@@ -325,7 +334,8 @@ class WorkflowAnalysisRepositoryIT {
     private WorkflowRunAnalysis failure(long runId) {
         return new WorkflowRunAnalysis(REPOSITORY, runId, List.of(new FailedJobAnalysis(
                 job(runId), LogStatus.AVAILABLE, null,
-                ANALYZER.analyze("[ERROR] /src/App.java:[12,4] cannot find symbol"))));
+                ANALYZER.analyze("[ERROR] /src/App.java:[12,4] cannot find symbol"),
+                LogStorageService.objectKey(1, runId, 1, 7))));
     }
 
     private WorkflowRunAnalysis empty(long runId) {
