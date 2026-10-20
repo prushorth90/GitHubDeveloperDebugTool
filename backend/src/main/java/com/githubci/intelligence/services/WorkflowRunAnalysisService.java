@@ -7,6 +7,7 @@ import com.githubci.intelligence.dto.GitHubJob;
 import com.githubci.intelligence.dto.GitHubJobs;
 import com.githubci.intelligence.dto.GitHubWorkflowRun;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis;
+import com.githubci.intelligence.dto.WorkflowEvent;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis.FailedJobAnalysis;
 import com.githubci.intelligence.exceptions.GitHubException;
 import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
@@ -41,6 +42,23 @@ public class WorkflowRunAnalysisService {
 
     public WorkflowRunAnalysis analyze(String owner, String repo, long runId) {
         GitHubWorkflowRun run = github.getWorkflowRun(owner, repo, runId);
+        return analyze(owner, repo, runId, run);
+    }
+
+    public WorkflowRunAnalysis analyze(WorkflowEvent event) {
+        event.validate();
+        String[] name = event.repositoryName().split("/");
+        GitHubWorkflowRun run = github.getWorkflowRunAttempt(
+                name[0], name[1], event.workflowRunId(), event.runAttempt());
+        if (run.runAttempt() == null || run.runAttempt() != event.runAttempt()
+                || run.repository() == null || run.repository().id() != event.repositoryId()
+                || !event.conclusion().equals(run.conclusion())) {
+            throw new GitHubException(HttpStatus.BAD_GATEWAY, "GitHub run does not match workflow event");
+        }
+        return analyze(name[0], name[1], event.workflowRunId(), run);
+    }
+
+    private WorkflowRunAnalysis analyze(String owner, String repo, long runId, GitHubWorkflowRun run) {
         if (run.id() != runId || run.runAttempt() == null || run.runAttempt() <= 0) {
             throw new GitHubException(HttpStatus.BAD_GATEWAY, "GitHub returned invalid workflow run metadata");
         }
@@ -55,7 +73,8 @@ public class WorkflowRunAnalysisService {
             return claim.record().analysis();
         }
         try {
-            WorkflowRunAnalysis result = analyzeAttempt(owner, repo, run);
+            WorkflowRunAnalysis result = analyzeAttempt(owner, repo, run, claim);
+            repository.renew(claim);
             repository.complete(claim, result);
             return result;
         } catch (RuntimeException failure) {
@@ -72,18 +91,21 @@ public class WorkflowRunAnalysisService {
         }
     }
 
-    private WorkflowRunAnalysis analyzeAttempt(String owner, String repo, GitHubWorkflowRun run) {
+    private WorkflowRunAnalysis analyzeAttempt(String owner, String repo, GitHubWorkflowRun run,
+            WorkflowAnalysisRepository.Claim claim) {
         long runId = run.id();
         int attempt = run.runAttempt();
         List<FailedJobAnalysis> failures = new ArrayList<>();
         long retrieved = 0;
         for (int page = 1; ; page++) {
+            repository.renew(claim);
             GitHubJobs jobs = github.listJobsForAttempt(owner, repo, runId, attempt, page, PAGE_SIZE);
             for (GitHubJob job : jobs.jobs()) {
                 if (job == null || job.id() <= 0 || job.runId() != runId) {
                     throw new GitHubException(HttpStatus.BAD_GATEWAY, "GitHub returned an invalid job");
                 }
                 if ("failure".equals(job.conclusion()) || "timed_out".equals(job.conclusion())) {
+                    repository.renew(claim);
                     failures.add(analyzeJob(owner, repo, run, job));
                 }
             }

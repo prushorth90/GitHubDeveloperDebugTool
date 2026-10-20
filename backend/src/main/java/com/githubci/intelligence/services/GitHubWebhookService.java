@@ -3,19 +3,15 @@ package com.githubci.intelligence.services;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.HexFormat;
-import java.util.LinkedHashMap;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import com.githubci.intelligence.dto.WorkflowEvent;
 import com.githubci.intelligence.exceptions.WebhookException;
+import com.githubci.intelligence.queue.WorkflowEventPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,22 +26,19 @@ import tools.jackson.databind.ObjectMapper;
 public class GitHubWebhookService {
 
     private static final Logger log = LoggerFactory.getLogger(GitHubWebhookService.class);
-    private static final Duration DELIVERY_TTL = Duration.ofHours(24);
-    private static final int MAX_DELIVERIES = 10_000;
     private static final Set<String> CONCLUSIONS = Set.of(
             "success", "failure", "neutral", "cancelled", "skipped", "timed_out",
             "action_required", "stale", "startup_failure");
 
     private final String secret;
     private final ObjectMapper mapper;
-    private final Clock clock;
-    private final Map<String, Instant> deliveries = new LinkedHashMap<>();
+    private final WorkflowEventPublisher publisher;
 
     public GitHubWebhookService(
-            @Value("${github.webhook-secret:}") String secret, ObjectMapper mapper, Clock clock) {
+            @Value("${github.webhook-secret:}") String secret, ObjectMapper mapper, WorkflowEventPublisher publisher) {
         this.secret = secret;
         this.mapper = mapper;
-        this.clock = clock;
+        this.publisher = publisher;
     }
 
     public void receive(byte[] body, String signature, String event, String deliveryId) {
@@ -96,7 +89,13 @@ public class GitHubWebhookService {
         WorkflowEvent workflowEvent = new WorkflowEvent(
                 positiveId(repository.path("id")), repositoryName, installationId,
                 positiveId(run.path("id")), (int) attempt, conclusion, deliveryId.toLowerCase(Locale.ROOT));
-        logOnce(workflowEvent);
+        if (WorkflowEvent.FAILED_CONCLUSIONS.contains(conclusion)) {
+            publisher.publish(workflowEvent);
+            log.info("GitHub workflow queued: repositoryId={}, repositoryName={}, installationId={}, "
+                            + "workflowRunId={}, runAttempt={}, conclusion={}, deliveryId={}",
+                    workflowEvent.repositoryId(), workflowEvent.repositoryName(), workflowEvent.installationId(),
+                    workflowEvent.workflowRunId(), workflowEvent.runAttempt(), conclusion, workflowEvent.deliveryId());
+        }
     }
 
     private void verifySignature(byte[] body, String signature) {
@@ -117,28 +116,6 @@ public class GitHubWebhookService {
         } catch (GeneralSecurityException exception) {
             throw new IllegalStateException("HMAC-SHA256 is unavailable", exception);
         }
-    }
-
-    private synchronized void logOnce(WorkflowEvent event) {
-        Instant now = clock.instant();
-        var iterator = deliveries.entrySet().iterator();
-        while (iterator.hasNext()) {
-            if (iterator.next().getValue().isAfter(now)) {
-                break;
-            }
-            iterator.remove();
-        }
-        if (deliveries.containsKey(event.deliveryId())) {
-            return;
-        }
-        log.info("GitHub workflow completed: repositoryId={}, repositoryName={}, installationId={}, "
-                        + "workflowRunId={}, runAttempt={}, conclusion={}, deliveryId={}",
-                event.repositoryId(), event.repositoryName(), event.installationId(),
-                event.workflowRunId(), event.runAttempt(), event.conclusion(), event.deliveryId());
-        if (deliveries.size() >= MAX_DELIVERIES) {
-            deliveries.remove(deliveries.keySet().iterator().next());
-        }
-        deliveries.put(event.deliveryId(), now.plus(DELIVERY_TTL));
     }
 
     private static String text(JsonNode node) {

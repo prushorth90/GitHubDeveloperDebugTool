@@ -19,6 +19,9 @@ services:
       S3_ENDPOINT: http://localstack:4566
       S3_LOG_BUCKET: ${S3_LOG_BUCKET:-github-ci-logs}
       S3_PATH_STYLE_ACCESS: "true"
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/queue/${AWS_REGION:-us-east-1}/000000000000/workflow-events
+      SQS_WORKER_ENABLED: "true"
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: local
       AWS_SECRET_ACCESS_KEY: local
@@ -26,6 +29,8 @@ services:
       dynamodb-init:
         condition: service_completed_successfully
       s3-init:
+        condition: service_completed_successfully
+      sqs-init:
         condition: service_completed_successfully
     networks:
       - app
@@ -64,7 +69,8 @@ services:
   localstack:
     image: localstack/localstack:4.4.0
     environment:
-      SERVICES: s3
+      SERVICES: s3,sqs
+      SQS_ENDPOINT_STRATEGY: path
       PERSISTENCE: "1"
     ports:
       - "127.0.0.1:${S3_PORT:-4566}:4566"
@@ -85,6 +91,23 @@ services:
       S3_LOG_BUCKET: ${S3_LOG_BUCKET:-github-ci-logs}
     volumes:
       - ./docker/s3:/init:ro
+    depends_on:
+      localstack:
+        condition: service_started
+    networks:
+      - app
+
+  sqs-init:
+    image: amazon/aws-cli:2.27.41
+    entrypoint: ["/bin/sh", "/init/create-queues.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PAGER: ""
+      SQS_ENDPOINT: http://localstack:4566
+    volumes:
+      - ./docker/sqs:/init:ro
     depends_on:
       localstack:
         condition: service_started

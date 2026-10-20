@@ -1,4 +1,7 @@
 app:
+  sqs:
+    endpoint: ${SQS_ENDPOINT:http://localhost:4566}
+    queue-url: ${SQS_QUEUE_URL:http://localhost:4566/queue/${AWS_REGION:us-east-1}/000000000000/workflow-events}
   s3:
     endpoint: ${S3_ENDPOINT:http://localhost:4566}
     path-style-access: ${S3_PATH_STYLE_ACCESS:true}

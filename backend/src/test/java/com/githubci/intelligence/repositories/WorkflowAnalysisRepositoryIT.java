@@ -162,6 +162,19 @@ class WorkflowAnalysisRepositoryIT {
     }
 
     @Test
+    void renewalExtendsLeaseWithoutLosingMetadataAndFencesOldOwners() {
+        var run = run(42, 1, NOW);
+        var claim = repository.claim(REPOSITORY, run);
+        repositoryAt(NOW.plusSeconds(200)).renew(claim);
+        assertEquals(NOW.plusSeconds(500), repository.findRun(REPOSITORY, 42, 1).orElseThrow().leaseUntil());
+        assertEquals(run, repository.findRun(REPOSITORY, 42, 1).orElseThrow().workflowRun());
+        assertThrows(AnalysisConflictException.class, () -> repositoryAt(NOW.plusSeconds(301)).claim(REPOSITORY, run));
+        var takeover = repositoryAt(NOW.plusSeconds(501)).claim(REPOSITORY, run);
+        assertThrows(AnalysisConflictException.class, () -> repositoryAt(NOW.plusSeconds(502)).renew(claim));
+        repositoryAt(NOW.plusSeconds(502)).complete(takeover, empty(42));
+    }
+
+    @Test
     void failedProcessingCanBeRetriedWithoutLosingCreationTime() {
         var run = run(42, 1, NOW);
         var first = repository.claim(REPOSITORY, run);

@@ -2,7 +2,6 @@ package com.githubci.intelligence.controllers;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.HexFormat;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -11,12 +10,13 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.githubci.intelligence.dto.WorkflowEvent;
 import com.githubci.intelligence.exceptions.GlobalExceptionHandler;
 import com.githubci.intelligence.services.GitHubWebhookService;
+import com.githubci.intelligence.queue.WorkflowEventPublisher;
+import com.githubci.intelligence.exceptions.WebhookException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,6 +28,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.http.HttpStatus;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,7 +37,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
+import static org.mockito.ArgumentMatchers.any;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -60,6 +65,8 @@ class GitHubWebhookControllerTest {
     private WebApplicationContext context;
     @Autowired
     private ObjectMapper mapper;
+    @MockitoBean
+    private WorkflowEventPublisher publisher;
 
     private MockMvc mvc;
     private String delivery;
@@ -94,6 +101,7 @@ class GitHubWebhookControllerTest {
         assertFalse(message.contains(SECRET));
         assertFalse(message.contains("sha256="));
         assertNull(appender.list.getFirst().getThrowableProxy());
+        verify(publisher).publish(new WorkflowEvent(123, "octo/demo", 456L, 789, 2, "failure", delivery));
     }
 
     @Test
@@ -131,19 +139,20 @@ class GitHubWebhookControllerTest {
     }
 
     @Test
-    void suppressesDuplicateDeliveryButAcceptsNewDeliveryAndNewAttempt() throws Exception {
+    void republishesDuplicateDeliveriesForDurableWorkerDeduplication() throws Exception {
         mvc.perform(signed(PAYLOAD, "workflow_run", delivery)).andExpect(status().isNoContent());
         mvc.perform(signed(PAYLOAD, "workflow_run", delivery.toUpperCase(java.util.Locale.ROOT)))
                 .andExpect(status().isNoContent());
         mvc.perform(signed(PAYLOAD.replace("\"run_attempt\": 2", "\"run_attempt\": 3"),
                         "workflow_run", UUID.randomUUID().toString()))
                 .andExpect(status().isNoContent());
-        assertEquals(2, appender.list.size());
+        assertEquals(3, appender.list.size());
+        verify(publisher, times(3)).publish(any());
         assertEquals(3, appender.list.getLast().getArgumentArray()[4]);
     }
 
     @Test
-    void suppressesConcurrentDuplicateDeliveries() throws Exception {
+    void publishesConcurrentDuplicateDeliveries() throws Exception {
         try (var executor = Executors.newFixedThreadPool(4)) {
             var tasks = IntStream.range(0, 8)
                     .<java.util.concurrent.Callable<Integer>>mapToObj(index -> () ->
@@ -154,46 +163,19 @@ class GitHubWebhookControllerTest {
                 assertEquals(204, result.get());
             }
         }
-        assertEquals(1, appender.list.size());
+        assertEquals(8, appender.list.size());
+        verify(publisher, times(8)).publish(any());
     }
 
     @Test
-    void deliveryIdExpiresAtTwentyFourHours() throws Exception {
-        Clock clock = mock(Clock.class);
-        Instant start = Instant.parse("2026-10-19T00:00:00Z");
-        when(clock.instant()).thenReturn(start);
-        GitHubWebhookService service = new GitHubWebhookService(SECRET, mapper, clock);
-        byte[] bytes = PAYLOAD.getBytes(StandardCharsets.UTF_8);
-        service.receive(bytes, signature(bytes), "workflow_run", delivery);
-        when(clock.instant()).thenReturn(start.plusSeconds(86_399));
-        service.receive(bytes, signature(bytes), "workflow_run", delivery);
-        assertEquals(1, appender.list.size());
-        when(clock.instant()).thenReturn(start.plusSeconds(86_400));
-        service.receive(bytes, signature(bytes), "workflow_run", delivery);
-        assertEquals(2, appender.list.size());
-    }
-
-    @Test
-    void cacheRetainsTenThousandDeliveryIdsAndThenEvictsOldest() throws Exception {
-        Clock clock = Clock.fixed(Instant.parse("2026-10-19T00:00:00Z"), java.time.ZoneOffset.UTC);
-        GitHubWebhookService service = new GitHubWebhookService(SECRET, mapper, clock);
-        byte[] bytes = PAYLOAD.getBytes(StandardCharsets.UTF_8);
-        String signature = signature(bytes);
-        Level originalLevel = logger.getLevel();
-        try {
-            logger.setLevel(Level.OFF);
-            service.receive(bytes, signature, "workflow_run", delivery);
-            for (int index = 1; index < 10_000; index++) {
-                service.receive(bytes, signature, "workflow_run", new UUID(0, index).toString());
-            }
-        } finally {
-            logger.setLevel(originalLevel);
-        }
-        service.receive(bytes, signature, "workflow_run", delivery);
+    void queueFailureReturns503AndRedeliveryCanPublish() throws Exception {
+        doThrow(new WebhookException(HttpStatus.SERVICE_UNAVAILABLE, "Could not enqueue workflow event"))
+                .doNothing().when(publisher).publish(any());
+        mvc.perform(signed(PAYLOAD, "workflow_run", delivery)).andExpect(status().isServiceUnavailable());
         assertTrue(appender.list.isEmpty());
-        service.receive(bytes, signature, "workflow_run", UUID.randomUUID().toString());
-        service.receive(bytes, signature, "workflow_run", delivery);
-        assertEquals(2, appender.list.size());
+        mvc.perform(signed(PAYLOAD, "workflow_run", delivery)).andExpect(status().isNoContent());
+        verify(publisher, times(2)).publish(any());
+        assertEquals(1, appender.list.size());
     }
 
     @Test
@@ -267,22 +249,24 @@ class GitHubWebhookControllerTest {
     }
 
     @Test
-    void acceptsSuccessfulRunsAndOptionalInstallation() throws Exception {
+    void ignoresSuccessfulRunsAndAcceptsFailedRunsWithOptionalInstallation() throws Exception {
         for (String payload : new String[] {
                 PAYLOAD.replace("\"installation\": {\"id\": 456},", ""),
                 PAYLOAD.replace("\"installation\": {\"id\": 456}", "\"installation\": null")}) {
             mvc.perform(signed(payload.replace("\"failure\"", "\"success\""),
                             "workflow_run", UUID.randomUUID().toString()))
                     .andExpect(status().isNoContent());
-            assertNull(appender.list.getLast().getArgumentArray()[2]);
-            assertEquals("success", appender.list.getLast().getArgumentArray()[5]);
+            assertTrue(appender.list.isEmpty());
         }
+        mvc.perform(signed(PAYLOAD.replace("\"installation\": {\"id\": 456},", ""),
+                "workflow_run", delivery)).andExpect(status().isNoContent());
+        assertNull(appender.list.getLast().getArgumentArray()[2]);
     }
 
     @Test
     void missingSecretFailsClosedWithoutAffectingOtherRoutes() throws Exception {
         MockMvc unconfigured = MockMvcBuilders.standaloneSetup(new GitHubWebhookController(
-                        new GitHubWebhookService("", mapper, Clock.systemUTC())))
+                        new GitHubWebhookService("", mapper, mock(WorkflowEventPublisher.class))))
                 .setControllerAdvice(new GlobalExceptionHandler(Clock.systemUTC())).build();
         unconfigured.perform(signed(PAYLOAD, "workflow_run", delivery))
                 .andExpect(status().isServiceUnavailable())

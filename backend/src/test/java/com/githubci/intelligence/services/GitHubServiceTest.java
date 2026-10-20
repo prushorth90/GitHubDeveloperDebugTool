@@ -109,6 +109,17 @@ class GitHubServiceTest {
     }
 
     @Test
+    void retrievesExactRunAttemptInsteadOfLatestRerun() {
+        apiServer.expect(requestTo(ROOT + "/actions/runs/42/attempts/2"))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer unit-test-token"))
+                .andRespond(withSuccess("""
+                        {"id":42,"workflow_id":3,"run_number":8,"run_attempt":2,
+                        "status":"completed","conclusion":"failure"}
+                        """, MediaType.APPLICATION_JSON));
+        assertEquals(2, service.getWorkflowRunAttempt("octo", "demo", 42, 2).runAttempt());
+    }
+
+    @Test
     void retrievesWorkflowDefinitionAndIndividualRun() {
         apiServer.expect(requestTo(ROOT + "/actions/workflows/3"))
                 .andRespond(withSuccess("""

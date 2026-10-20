@@ -1,7 +1,8 @@
 # DynamoDB workflow analysis persistence
 
 The backend uses AWS SDK for Java v2 and the DynamoDB Enhanced Client.
-`WorkflowAnalysisRepository` owns table access; application startup never creates
+`WorkflowAnalysisRepository` owns result access; `WorkflowEventRepository` owns
+the ID-keyed queue processing ledger in the same table. Application startup never creates
 or modifies tables. Health endpoints remain application-liveness checks.
 
 ## Environment
@@ -13,7 +14,7 @@ or modifies tables. Health endpoints remain application-liveness checks.
 | `DYNAMODB_TABLE_NAME` | `workflow-analyses` | Existing table name |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | none | Standard SDK environment credentials |
 | `AWS_SESSION_TOKEN` | none | Required alongside temporary environment credentials |
-| `DYNAMODB_PROCESSING_LEASE` | `PT5M` | Positive ISO-8601 processing lease duration |
+| `DYNAMODB_PROCESSING_LEASE` | `PT5M` | ISO-8601 lease duration, at least 30 seconds for event processing |
 
 Credentials use the SDK default provider chain: environment credentials, profiles,
 web identity, ECS/EC2 roles, etc. Prefer workload IAM roles in production. Dummy
@@ -58,7 +59,7 @@ explicit schema migration, not automatic recreation.
 
 Set `SPRING_PROFILES_ACTIVE=prod`, `AWS_REGION`, and `DYNAMODB_TABLE_NAME`;
 **unset** `DYNAMODB_ENDPOINT`. Grant the backend role `dynamodb:GetItem` and
-`dynamodb:PutItem` on the table, and `dynamodb:Query` on
+`dynamodb:PutItem` and `dynamodb:UpdateItem` on the table, and `dynamodb:Query` on
 `table/<name>/index/recent-failures`. It needs neither table creation nor scan
 permissions. Configure encryption, backup/retention and access controls to suit
 your deployment. Compose deliberately targets Local, even with the Spring `prod`
@@ -139,14 +140,28 @@ storage before increasing supported workload size.
    leaves work reclaimable after lease expiry; a committed result cannot be
    downgraded by a subsequent failure write.
 
-Active/stale claim conflicts return HTTP 409 with `Retry-After: 30`. No automatic
-processing retry, lease renewal, queue or background worker is introduced.
-Configure the lease above your expected synchronous analysis duration (plus
-storage/network time); a worker that exceeds it fails rather than committing
-stale work. Distributed workers need reasonably synchronized clocks.
-Reattempts fetch jobs from GitHub's attempt-specific endpoint, avoiding a race
-with a newer rerun. Existing webhook reception remains authenticated and
-log-only; its delivery-ID cache is independent of repository idempotency.
+Active/stale claim conflicts return HTTP 409 with `Retry-After: 30` for the manual
+analysis endpoint. Analysis renews its lease between pages/failed jobs and before
+completion. Configure the lease above the longest single job download/upload/
+analysis operation; exceeding it fails rather than committing stale work.
+Distributed workers need reasonably synchronized clocks.
+
+Failed-workflow webhooks publish to SQS. A separate ledger item in this table uses
+`pk=REPOSITORY#<repository-id>#RUN#<run-id>#ATTEMPT#<attempt>`, `sk=EVENT`, independent
+of repository name or GitHub delivery ID. It stores `status` (`PROCESSING`,
+`FAILED`, `COMPLETED`), `processingAttempts`, numeric epoch-millisecond
+`createdAt`/`updatedAt`/`leaseUntil`, and an ownership token. It has no GSI keys or
+automatic TTL. Conditional `UpdateItem` claims/renewals/terminal writes prevent
+concurrent or stale event workers from completing another owner's work.
+These items are not result DTOs and are never returned by result queries.
+
+The event worker renews ownership/visibility every five seconds, and only marks
+the ledger complete after the result is durable. A retry after result persistence
+but before event completion reuses the result; a retry after event completion
+skips all GitHub/S3 work. A crash before completion allows takeover after expiry.
+The worker retrieves metadata and jobs for the event's exact attempt, avoiding a
+race with a newer rerun. See [SQS operation and recovery](../README.md#asynchronous-worker-retries-and-recovery)
+for acknowledgement, backoff, DLQ, IAM and local test details.
 
 ## Tests
 

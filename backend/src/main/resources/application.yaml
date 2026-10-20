@@ -20,6 +20,12 @@ management:
       show-details: never
 
 app:
+  sqs:
+    endpoint: ${SQS_ENDPOINT:}
+    region: ${AWS_REGION:us-east-1}
+    queue-url: ${SQS_QUEUE_URL:}
+    worker-enabled: ${SQS_WORKER_ENABLED:false}
+    visibility-seconds: ${SQS_VISIBILITY_SECONDS:120}
   s3:
     endpoint: ${S3_ENDPOINT:}
     region: ${AWS_REGION:us-east-1}

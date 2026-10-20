@@ -119,6 +119,26 @@ public class WorkflowAnalysisRepository {
         }
     }
 
+    public void renew(Claim claim) {
+        try {
+            table.updateItem(request -> request
+                    .item(leaseItem(claim))
+                    .ignoreNulls(true)
+                    .conditionExpression(ownsLease(claim)));
+        } catch (ConditionalCheckFailedException staleWorker) {
+            throw new AnalysisConflictException();
+        }
+    }
+
+    private WorkflowAnalysisItem leaseItem(Claim claim) {
+        WorkflowAnalysisItem item = new WorkflowAnalysisItem();
+        item.setPk(partition(claim.record().repository()));
+        item.setSk(sort(claim.record().workflowRun().id(), claim.record().workflowRun().runAttempt()));
+        item.setLeaseUntil(TIMESTAMP.format(clock.instant().plus(lease)));
+        item.setUpdatedAt(TIMESTAMP.format(clock.instant()));
+        return item;
+    }
+
     public Optional<StoredWorkflowAnalysis> findRun(String repository, long runId, int attempt) {
         return Optional.ofNullable(table.getItem(request -> request
                         .key(key(repository, runId, attempt)).consistentRead(true)))

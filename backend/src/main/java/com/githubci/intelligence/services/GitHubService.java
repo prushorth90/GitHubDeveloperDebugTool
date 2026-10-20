@@ -59,6 +59,13 @@ public class GitHubService {
         return get(repositoryPath(owner, repo) + "/actions/runs/" + runId, GitHubWorkflowRun.class);
     }
 
+    public GitHubWorkflowRun getWorkflowRunAttempt(String owner, String repo, long runId, int attempt) {
+        validateId(runId);
+        validateId(attempt);
+        return get(repositoryPath(owner, repo) + "/actions/runs/" + runId
+                + "/attempts/" + attempt, GitHubWorkflowRun.class);
+    }
+
     public GitHubJobs listJobs(String owner, String repo, long runId, int page, int perPage) {
         validateId(runId);
         validatePagination(page, perPage);

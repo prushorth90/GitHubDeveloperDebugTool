@@ -3,7 +3,8 @@
 This repository provides a developer dashboard, backend health API, and GitHub
 Actions REST access and standalone deterministic failure analysis with established
 component boundaries, DynamoDB analysis persistence, and S3 job log storage.
-It does not implement automated CI data ingestion or end-user authentication.
+Failed-workflow webhooks drive asynchronous CI ingestion through SQS.
+End-user authentication is not implemented.
 
 ## Backend
 
@@ -43,7 +44,14 @@ attempt's jobs, and conditionally commits the result. Completed results are
 reused; failed or lease-expired work is retryable. Token-fenced conditional
 writes prevent stale workers from overwriting newer results. A sparse GSI lists
 completed failures by workflow creation time. See [DynamoDB access patterns](dynamodb.md).
-Webhook reception remains log-only and is not connected to this processing flow.
+`GitHubWebhookService` authenticates and validates failed-workflow events and
+publishes `WorkflowEvent` messages before acknowledging HTTP requests.
+`SqsWorkflowEventConsumer` polls SQS and calls the transport-independent
+`WorkflowEventWorker`. A separate ID/run/attempt ledger in DynamoDB fences
+concurrent deliveries and tracks `PROCESSING`/`FAILED`/`COMPLETED` states.
+Heartbeat renewal, retry backoff and native SQS DLQ redrive support recovery.
+Messages are deleted only after all required work and durable completion.
+The existing synchronous analysis route remains available.
 
 `GitHubConfiguration` provides timeout-bounded `RestClient` instances with
 automatic redirects disabled. Authenticated API calls are restricted to
@@ -62,8 +70,9 @@ Its immutable `FailureAnalysis` DTO separates observed diagnostics, line-numbere
 evidence and surrounding context from suspected causes and investigation advice.
 Specific diagnostics outrank build wrappers; equally strong conflicting categories
 remain unknown. PostgreSQL attribution requires connection-specific supporting
-evidence, not merely a generic network error. Analysis is wired to the synchronous
-HTTP analysis route, but not the frontend. See [local failure analysis](../README.md#local-failure-analysis)
+evidence, not merely a generic network error. Analysis is wired to both the
+synchronous HTTP analysis route and asynchronous webhook worker, but not the frontend.
+See [local failure analysis](../README.md#local-failure-analysis)
 for the categories, confidence semantics and local test command.
 
 `LogStorageService` stores sanitized UTF-8 gzip logs through AWS SDK for Java v2.
@@ -116,7 +125,8 @@ selectors do not make API requests. No component test framework is configured.
 ## Infrastructure and operations
 
 [The CDK app](../infrastructure/bin/github-ci-intelligence.ts) creates an
-environment-agnostic stack with a private, encrypted, TLS-only S3 log bucket.
+environment-agnostic stack with a private, encrypted, TLS-only S3 log bucket
+and encrypted, TLS-only SQS workflow queue and dead-letter queue.
 Its lifecycle expires logs after 30 days and aborts incomplete uploads after one
 day; versioning is disabled. The bucket is retained on stack removal. Deployment
 must separately provide the backend role and DynamoDB table.

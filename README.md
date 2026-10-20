@@ -3,6 +3,7 @@
 A full-stack developer tool with a GitHub Actions REST integration and developer
 dashboard and a deterministic CI failure analyzer. Workflow analyses are persisted
 in Amazon DynamoDB; sanitized, compressed job logs are stored in Amazon S3.
+Authenticated failed-workflow webhooks are queued in Amazon SQS for asynchronous processing.
 End-user authentication is not implemented.
 
 ## Technology
@@ -103,8 +104,11 @@ Start and initialize the local database, then export the backend environment
 docker compose up -d dynamodb-local localstack
 docker compose run --rm dynamodb-init
 docker compose run --rm s3-init
+docker compose run --rm sqs-init
 export DYNAMODB_ENDPOINT=http://localhost:8000
 export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local
+# Enable consumption in this process (Compose enables it automatically).
+export SQS_WORKER_ENABLED=true
 ```
 
 ```sh
@@ -254,28 +258,100 @@ parsing JSON or checking event type or duplicate delivery IDs. Never reformat
 or reserialize a payload before verifying it.
 
 - Only `X-GitHub-Event: workflow_run`, `action: completed`, and
-  `workflow_run.status: completed` are processed. All standard terminal
-  conclusions, including success, are accepted; this is not failure analysis.
-- Accepted, duplicate, and unrelated events return **204** with no body.
+  `workflow_run.status: completed` are considered. Failed conclusions
+  `failure`, `timed_out`, and `startup_failure` are published; other valid
+  conclusions (including success/cancelled) are ignored.
+- Enqueued, duplicate, and unrelated events return **204** with no body.
+  A relevant event receives 204 only after SQS accepts the message.
   Unrelated event types are authenticated but do not need to be parsed.
 - Missing/invalid signatures return **401**; malformed signed workflow JSON,
   required metadata, or delivery headers return **400**. Missing server secret
-  returns **503**, without disabling health or other API routes. Errors use
+  returns **503**, as does failed/unconfirmed queue publication, without disabling health or other API routes. Errors use
   the existing `ApiError` contract and never include request bodies or secrets.
 - `WorkflowEvent` is a queue-ready DTO with `repository_id`, `repository_name`
   (GitHub's `repository.full_name`, e.g. `octo/demo`), nullable `installation_id`,
   `workflow_run_id`, `run_attempt`, `conclusion`, and `delivery_id`.
   Positive numeric IDs and attempts are required. Installation may be absent.
-- Initially the backend only logs these validated, allowlisted metadata fields.
-  It does not retain payloads, store events, call GitHub, analyze runs, or send
-  anything to SQS. Repository names are log-safe; bodies, signatures, tokens,
-  branch names, commit messages, and other untrusted text are not logged.
-- A thread-safe, process-local cache retains **only delivery IDs and expiry
-  times**, for 24 hours, up to 10,000 IDs (oldest entries are evicted at capacity).
-  Repeated delivery IDs are acknowledged without logging twice. A new delivery
-  ID, including a rerun attempt, is processed independently. Restarting the
-  process, expiration, eviction, or multiple backend instances can allow repeats.
-  Durable, cross-instance idempotency must be added with future SQS integration.
+- Only extracted `WorkflowEvent` metadata is sent to SQS, not the webhook body
+  or signature. The request never retrieves job logs or analyzes work.
+- Every relevant delivery is published, including redeliveries: there is no
+  process-local deduplication that could lose work after a failed send.
+  SQS can accept a message even if the send response is lost; retries are safe.
+  The worker uses durable repository-ID/run-ID/attempt idempotency, not delivery IDs.
+  Bodies, signatures, tokens, branch names and commit messages are not logged.
+
+#### Asynchronous worker, retries and recovery
+
+`WorkflowEventWorker.process(event)` is a plain Java entry point, independent of
+SQS receipt handles and Lambda event classes. It can run directly in tests or a
+local harness. `SqsWorkflowEventConsumer` is the polling adapter, enabled with
+`SQS_WORKER_ENABLED=true`. Disabled by default for host-run processes/tests,
+it is enabled in Compose. Separate web/worker processes can share the same queue,
+table and bucket; the web process can leave polling disabled.
+
+The worker conditionally claims a durable event ledger item in the existing
+DynamoDB table with `pk=REPOSITORY#<id>#RUN#<id>#ATTEMPT#<n>`, `sk=EVENT`.
+States are `PROCESSING`, retryable `FAILED`, and `COMPLETED`; SQS itself represents
+queued work. Ledger items retain processing-attempt counts, timestamps, a random
+ownership token and a lease deadline. They deliberately have no automatic TTL:
+deleting them removes durable duplicate protection. Result items retain the
+existing name-based API/query schema.
+
+The worker fetches the **specific run attempt**, validates repository ID/run ID/
+attempt/conclusion against the event, retrieves failed/timed-out jobs, redacts
+logs before analysis, uploads gzip logs under deterministic S3 keys, and commits
+results through the existing analyzer. Missing/expired/empty GitHub logs remain
+explicit `UNAVAILABLE` per-job results, not fabricated diagnoses.
+
+An event is marked `COMPLETED` only after required uploads and DynamoDB result
+persistence finish. Only then may the adapter delete the SQS message. Completed
+duplicates skip GitHub/S3 entirely. A lost delete response is safe to replay.
+If result persistence succeeds but event completion fails, retry reuses the
+completed result. If an upload succeeds before a later failure, retry can
+re-upload the same key rather than create duplicate objects; no cross-service
+transaction or exactly-once execution is claimed.
+
+Conditional token/deadline checks fence stale workers. A five-second heartbeat
+renews the event lease and SQS visibility while processing. Heartbeat failure
+prevents successful acknowledgement. Analysis leases are renewed between pages/
+failed jobs and before completion. `DYNAMODB_PROCESSING_LEASE` defaults to `PT5M`
+and must be at least 30 seconds and exceed the longest individual job's bounded
+download/upload/analyze operation. A crash leaves a claim recoverable after
+lease expiry. Workers need synchronized clocks.
+
+Failures remain on SQS with exponential visibility backoff (30 seconds through
+15 minutes). The provisioned redrive policy moves messages to the DLQ after five
+receives, including invalid/poison messages. Retry-delay failures are logged and
+the existing visibility timeout still applies. Monitor queue age, worker errors,
+and DLQ depth; after fixing the cause, use SQS redrive to replay DLQ messages.
+Do not delete an unresolved message or a completed idempotency record to retry it.
+A future Lambda adapter should report per-message batch failures and call the
+same worker, never acknowledge a whole batch after a partial failure.
+
+| Variable | Purpose |
+| --- | --- |
+| `SQS_ENDPOINT` | SDK override; local profile defaults to `http://localhost:4566`, unset in AWS |
+| `SQS_QUEUE_URL` | Required in production; local defaults to `http://localhost:4566/queue/us-east-1/000000000000/workflow-events` |
+| `SQS_WORKER_ENABLED` | `false` by default; Compose sets `true` |
+| `SQS_VISIBILITY_SECONDS` | Initial/renewed visibility, default 120, supported range 30-43200 seconds |
+
+Local setup uses `docker compose run --rm sqs-init` to provision the standard
+queue and a 14-day DLQ in LocalStack. Queue retention is four days. The CDK stack
+provisions equivalent encrypted, TLS-only SQS resources and outputs their URLs/
+ARN. Production must supply workload roles and the DynamoDB table separately:
+web publishers need `sqs:SendMessage`; workers need `sqs:ReceiveMessage`,
+`sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`, DynamoDB `GetItem`/`PutItem`/
+`UpdateItem`, and S3 read/write permissions for the managed log prefix.
+Keep queue access restricted to trusted publishers.
+
+Local tests need no AWS account or Lambda runtime:
+
+```sh
+# Mocked queue adapters, worker and authenticated webhook contract:
+mvn -f backend/pom.xml -Dtest=SqsWorkflowEventTest,WorkflowEventWorkerTest,GitHubWebhookControllerTest test
+# Real LocalStack SQS/S3/DynamoDB, partial failures, fencing and DLQ redrive:
+mvn -f backend/pom.xml -Dtest=WorkflowQueueIT test
+```
 
 #### Test locally through an HTTPS tunnel
 
@@ -317,11 +393,12 @@ or reserialize a payload before verifying it.
    webhook can omit it. The initial signed `ping` should receive 204 without
    creating a workflow metadata log entry.
 
-4. Run a small Actions workflow and wait for completion. In GitHub's **Recent
+4. Run a small **failing** Actions workflow and wait for completion. In GitHub's **Recent
    deliveries**, verify the completed `workflow_run` delivery received 204.
-   The backend should log one metadata line with its delivery ID, run ID,
-   attempt, and conclusion. Use **Redeliver** for the same delivery: it should
-   still receive 204, with no second metadata line while the ID is cached.
+   The backend should log a queue acceptance line with its delivery ID, run ID,
+   attempt, and conclusion. With polling enabled, verify the stored analysis and
+   sanitized S3 objects. Use **Redeliver** for the same delivery: it should
+   still receive 204 and log queue acceptance, but the completed worker skips work.
    Non-completed workflow events should also receive 204 with no metadata log.
    To check rejection, temporarily configure a different secret in the test
    webhook, trigger an event, and verify 401; restore the matching secret.
@@ -453,7 +530,8 @@ invented for missing logs.
 Invalid names/IDs and GitHub API errors use the error statuses above, including
 `Retry-After` for rate limits; they do not return a partial success. An incomplete
 jobs response also returns 502 rather than silently omitting jobs.
-The endpoint has no request body, queues or automatic processing retries.
+This manual analysis endpoint has no request body or automatic processing retries;
+it remains synchronous, independently of the asynchronous webhook path.
 It retrieves completed run metadata, claims the run attempt in DynamoDB, and
 fetches that attempt's jobs before persisting the result. A repeated request
 reuses a completed result; an active claim returns 409 with `Retry-After`.
