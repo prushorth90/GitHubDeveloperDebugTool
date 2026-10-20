@@ -22,6 +22,11 @@ management:
 app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  dynamodb:
+    endpoint: ${DYNAMODB_ENDPOINT:}
+    region: ${AWS_REGION:us-east-1}
+    table-name: ${DYNAMODB_TABLE_NAME:workflow-analyses}
+    processing-lease: ${DYNAMODB_PROCESSING_LEASE:PT5M}
 
 github:
   token: ${GITHUB_TOKEN:}

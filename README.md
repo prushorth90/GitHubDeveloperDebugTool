@@ -1,12 +1,13 @@
 # GitHub CI Intelligence
 
 A full-stack developer tool with a GitHub Actions REST integration and developer
-dashboard and a deterministic CI failure analyzer. End-user authentication and
-persistence are not implemented.
+dashboard and a deterministic CI failure analyzer. Workflow analyses are persisted
+in Amazon DynamoDB. End-user authentication is not implemented.
 
 ## Technology
 
 - **Backend:** Java 21, Spring Boot 4.1.1, Maven.
+- **Persistence:** AWS SDK for Java v2, DynamoDB Enhanced Client, DynamoDB Local.
 - **Frontend:** React 19, TypeScript 5.9, Vite 8, Material UI 9 with Emotion,
   React Router, TanStack Query, and Axios.
 - **Infrastructure:** AWS CDK v2 in TypeScript, with an empty, environment-agnostic stack.
@@ -78,7 +79,7 @@ Unused source folders contain `.gitkeep` files so Git preserves them. See
   Maven must use the intended JDK via `JAVA_HOME`.
 - Node.js **22.12+ on the 22 LTS line**, or a supported newer LTS (24+),
   and npm **10+**. `.nvmrc` selects Node 22.
-- Docker with Compose v2, only for containerized development.
+- Docker with Compose v2, for DynamoDB Local and repository integration tests.
 - AWS credentials and an AWS account are **not** needed to synthesize the
   current empty stack. They will be needed for future deployments.
 
@@ -93,6 +94,16 @@ npm ci
 ```
 
 ## Run the backend
+
+Start and initialize the local database, then export the backend environment
+(Maven does not automatically load `.env`):
+
+```sh
+docker compose up -d dynamodb-local
+docker compose run --rm dynamodb-init
+export DYNAMODB_ENDPOINT=http://localhost:8000
+export AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local
+```
 
 ```sh
 mvn -f backend/pom.xml spring-boot:run
@@ -150,7 +161,10 @@ mvn -f backend/pom.xml verify
 java -jar backend/target/github-ci-intelligence-backend.jar
 ```
 
-No persistence driver, JPA, Lombok, or authentication library is included.
+DynamoDB configuration, table schema, access patterns, processing leases,
+production setup, and integration test commands are documented in
+[DynamoDB persistence](docs/dynamodb.md). No JPA, Lombok, or authentication library
+is included.
 
 ### GitHub workflow webhooks
 
@@ -366,9 +380,15 @@ invented for missing logs.
 Invalid names/IDs and GitHub API errors use the error statuses above, including
 `Retry-After` for rate limits; they do not return a partial success. An incomplete
 jobs response also returns 502 rather than silently omitting jobs.
-The endpoint has no request body, queues, database writes or automatic retries.
-All work occurs in the HTTP request, so large runs can take time; this is
-intended for local development. Results and log-derived content are not persisted.
+The endpoint has no request body, queues or automatic processing retries.
+It retrieves completed run metadata, claims the run attempt in DynamoDB, and
+fetches that attempt's jobs before persisting the result. A repeated request
+reuses a completed result; an active claim returns 409 with `Retry-After`.
+Failed or expired processing can be retried safely. GitHub metadata is still
+fetched on cache hits to enforce the existing upstream access checks.
+Non-completed runs return 409. All work occurs in the HTTP request, so large
+runs can take time. Results and selected log-derived evidence are persisted;
+full raw logs are not. See [persistence limits and access patterns](docs/dynamodb.md).
 
 `FailureAnalyzerService.analyze(String rawLogs)` accepts plain-text job logs and
 returns an immutable `FailureAnalysis` record. It is a Spring service but can also
@@ -538,9 +558,10 @@ docker compose up --build
 
 - Frontend: `http://localhost:3000` (production assets served by nginx).
 - Backend: `http://localhost:8080` (Java 21 runtime).
-- Both published ports bind only to the local machine.
+- DynamoDB Local: `http://localhost:8000`, persisted in a named Docker volume.
+- All published ports bind only to the local machine.
 
-Both services join the same Compose-managed bridge network. The browser calls
+All services join the same Compose-managed bridge network. The browser calls
 `/api/...` on `localhost:3000`; Nginx forwards the unchanged path to
 `backend:8080` over that network. Docker-internal names never need to resolve in
 the browser. React client routes fall back to `index.html`; API failures are
@@ -548,7 +569,8 @@ returned by the backend, not replaced by the SPA.
 
 The backend uses a multistage Maven build and a non-root Java 21 JRE runtime.
 Its health check probes `/actuator/health`. Compose waits for a healthy backend
-before starting the frontend. The frontend uses a Node build stage and an Nginx
+before starting the frontend, and for successful DynamoDB table initialization
+before starting the backend. The frontend uses a Node build stage and an Nginx
 runtime whose health check probes `/healthz`. The UI's health indicator verifies
 the full browser-to-proxy-to-backend path via `/api/health`.
 
@@ -560,6 +582,9 @@ Compose reads optional overrides from the root `.env` (or the shell):
 | --- | --- | --- |
 | `FRONTEND_PORT` | `3000` | Frontend's localhost-only published port |
 | `BACKEND_PORT` | `8080` | Backend's localhost-only published port; internal port stays 8080 |
+| `DYNAMODB_PORT` | `8000` | DynamoDB Local's localhost-only published port |
+| `DYNAMODB_TABLE_NAME` | `workflow-analyses` | Table created by the initializer and used by the backend |
+| `AWS_REGION` | `us-east-1` | DynamoDB region; Compose uses dummy local credentials |
 | `SPRING_PROFILES_ACTIVE` | `prod` | Spring profile, with graceful shutdown and health-only Actuator |
 | `CORS_ALLOWED_ORIGINS` | empty | Optional comma-separated origins for direct cross-origin API access |
 | `GITHUB_TOKEN` | empty | Backend-only GitHub token; GitHub routes return 503 until configured |
@@ -579,8 +604,9 @@ store with backend environment injection rather than frontend configuration.
 
 Stop local servers using these ports before starting Compose. Docker builds
 use the repository root as their context, and the backend image build runs
-its backend tests. Source changes require an image rebuild; this is not a
-hot-reload setup.
+its non-container backend tests. Repository integration tests require a Docker
+daemon and run in host/CI `mvn -f backend/pom.xml verify`, not inside the image
+build. Source changes require an image rebuild; this is not a hot-reload setup.
 
 ```sh
 # Alternatively, build and start detached, waiting for both health checks:

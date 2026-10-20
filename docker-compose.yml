@@ -14,9 +14,47 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      DYNAMODB_TABLE_NAME: ${DYNAMODB_TABLE_NAME:-workflow-analyses}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
     networks:
       - app
     stop_grace_period: 30s
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:3.1.0
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data"
+    user: "0:0"
+    ports:
+      - "127.0.0.1:${DYNAMODB_PORT:-8000}:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    networks:
+      - app
+
+  dynamodb-init:
+    image: amazon/aws-cli:2.27.41
+    entrypoint: ["/bin/sh", "/init/create-tables.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_PAGER: ""
+      DYNAMODB_ENDPOINT: http://dynamodb-local:8000
+      DYNAMODB_TABLE_NAME: ${DYNAMODB_TABLE_NAME:-workflow-analyses}
+    volumes:
+      - ./docker/dynamodb:/init:ro
+    depends_on:
+      dynamodb-local:
+        condition: service_started
+    networks:
+      - app
 
   frontend:
     build:
@@ -35,3 +73,6 @@ services:
 networks:
   app:
     driver: bridge
+
+volumes:
+  dynamodb-data:

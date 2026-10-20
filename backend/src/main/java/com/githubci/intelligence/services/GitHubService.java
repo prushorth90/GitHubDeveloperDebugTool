@@ -70,6 +70,19 @@ public class GitHubService {
         return result;
     }
 
+    public GitHubJobs listJobsForAttempt(
+            String owner, String repo, long runId, int attempt, int page, int perPage) {
+        validateId(runId);
+        validateId(attempt);
+        validatePagination(page, perPage);
+        GitHubJobs result = get(repositoryPath(owner, repo) + "/actions/runs/" + runId
+                + "/attempts/" + attempt + "/jobs?page=" + page + "&per_page=" + perPage, GitHubJobs.class);
+        if (result.jobs() == null || result.totalCount() < 0) {
+            throw invalidResponse();
+        }
+        return result;
+    }
+
     public String getFailedJobLogs(String owner, String repo, long jobId) {
         validateId(jobId);
         String path = repositoryPath(owner, repo) + "/actions/jobs/" + jobId;

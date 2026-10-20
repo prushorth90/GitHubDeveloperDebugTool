@@ -75,6 +75,14 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return error(exception.getStatus(), HttpHeaders.EMPTY, exception.getMessage(), request);
     }
 
+    @ExceptionHandler(AnalysisConflictException.class)
+    public ResponseEntity<Object> handleAnalysisConflict(AnalysisConflictException exception, WebRequest request) {
+        log.warn("Workflow analysis conflict: {}", exception.getMessage());
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.RETRY_AFTER, "30");
+        return error(HttpStatus.CONFLICT, headers, exception.getMessage(), request);
+    }
+
     private ResponseEntity<Object> error(
             HttpStatusCode status, HttpHeaders headers, String message, WebRequest request) {
         String path = ((ServletWebRequest) request).getRequest().getRequestURI();

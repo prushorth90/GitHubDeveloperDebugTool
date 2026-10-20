@@ -73,6 +73,14 @@ class GlobalExceptionHandlerTest {
         assertError(mvc.perform(get("/missing")), 404, "Not Found", "Not Found", "/missing");
     }
 
+    @Test
+    void reportsProcessingConflictsWithRetryAdvice() throws Exception {
+        ResultActions result = mvc.perform(get("/test/processing"));
+        assertError(result, 409, "Conflict",
+                "Analysis is already processing or its lease was lost; retry later", "/test/processing");
+        result.andExpect(header().string("Retry-After", "30"));
+    }
+
     private void assertError(ResultActions result, int code, String error, String message, String path)
             throws Exception {
         result.andExpect(status().is(code))
@@ -96,6 +104,11 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/test/constraint")
         public void constraint() {
             throw new ConstraintViolationException(Set.of());
+        }
+
+        @GetMapping("/test/processing")
+        public void processing() {
+            throw new AnalysisConflictException();
         }
 
         @PostMapping("/test/input")

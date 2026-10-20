@@ -3,7 +3,7 @@ WORKDIR /app
 COPY backend/pom.xml ./pom.xml
 RUN mvn --batch-mode --no-transfer-progress dependency:go-offline
 COPY backend/src ./src
-RUN mvn --batch-mode --no-transfer-progress verify
+RUN mvn --batch-mode --no-transfer-progress -DskipITs=true verify
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app

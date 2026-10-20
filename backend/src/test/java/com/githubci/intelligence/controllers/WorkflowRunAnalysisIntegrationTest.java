@@ -1,8 +1,14 @@
 package com.githubci.intelligence.controllers;
 
 import java.io.IOException;
+import java.time.Instant;
 
 import com.githubci.intelligence.configuration.GitHubConfiguration;
+import com.githubci.intelligence.dto.GitHubWorkflowRun;
+import com.githubci.intelligence.exceptions.AnalysisConflictException;
+import com.githubci.intelligence.models.AnalysisStatus;
+import com.githubci.intelligence.models.StoredWorkflowAnalysis;
+import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
 import com.githubci.intelligence.services.GitHubService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,11 +27,15 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.context.WebApplicationContext;
 
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.headerDoesNotExist;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -50,11 +60,18 @@ class WorkflowRunAnalysisIntegrationTest {
     @Autowired
     private MockGitHubConfiguration github;
     private MockMvc mvc;
+    @MockitoBean
+    private WorkflowAnalysisRepository repository;
 
     @BeforeEach
     void setUp() {
         github.api.reset();
         github.downloads.reset();
+        when(repository.claim(anyString(), any(GitHubWorkflowRun.class))).thenAnswer(invocation ->
+                new WorkflowAnalysisRepository.Claim(new StoredWorkflowAnalysis(
+                        invocation.getArgument(0), invocation.getArgument(1), AnalysisStatus.PROCESSING,
+                        null, Instant.now(), Instant.now(), Instant.now().plusSeconds(300)), "test-token"));
+        when(repository.fail(any())).thenReturn(true);
         mvc = MockMvcBuilders.webAppContextSetup(context).build();
     }
 
@@ -172,7 +189,8 @@ class WorkflowRunAnalysisIntegrationTest {
     @ParameterizedTest
     @ValueSource(ints = {401, 403, 404, 429, 500})
     void preservesGitHubErrorsInsteadOfReturningEmptySuccess(int upstreamStatus) throws Exception {
-        github.api.expect(requestTo(ROOT + "/runs/42/jobs?page=1&per_page=100"))
+        expectRun();
+        github.api.expect(requestTo(ROOT + "/runs/42/attempts/1/jobs?page=1&per_page=100"))
                 .andRespond(withStatus(HttpStatus.valueOf(upstreamStatus)).body("private upstream content"));
         int expected = upstreamStatus == 500 ? 502 : upstreamStatus;
         mvc.perform(post(PATH))
@@ -217,10 +235,42 @@ class WorkflowRunAnalysisIntegrationTest {
         mvc.perform(post(PATH)).andExpect(status().isBadGateway()).andExpect(jsonPath("$.status").value(502));
     }
 
+    @Test
+    void rejectsRunsThatAreStillInProgressWithoutClaimingOrDownloadingJobs() throws Exception {
+        github.api.expect(requestTo(ROOT + "/runs/42"))
+                .andRespond(withSuccess("""
+                        {"id":42,"workflow_id":3,"run_number":8,"run_attempt":1,"status":"in_progress"}
+                        """, MediaType.APPLICATION_JSON));
+        mvc.perform(post(PATH)).andExpect(status().isConflict());
+        org.mockito.Mockito.verifyNoInteractions(repository);
+    }
+
+    @Test
+    void returnsConflictWhenAnotherWorkerOwnsTheClaim() throws Exception {
+        expectRun();
+        when(repository.claim(anyString(), any())).thenThrow(new AnalysisConflictException());
+        mvc.perform(post(PATH)).andExpect(status().isConflict())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string(HttpHeaders.RETRY_AFTER, "30"));
+        org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).fail(any());
+    }
+
     private void expectJobs(int page, int total, String... jobs) {
-        github.api.expect(requestTo(ROOT + "/runs/42/jobs?page=" + page + "&per_page=100"))
+        if (page == 1) {
+            expectRun();
+        }
+        github.api.expect(requestTo(ROOT + "/runs/42/attempts/1/jobs?page=" + page + "&per_page=100"))
                 .andRespond(withSuccess("{\"total_count\":" + total + ",\"jobs\":["
                         + String.join(",", jobs) + "]}", MediaType.APPLICATION_JSON));
+    }
+
+    private void expectRun() {
+        github.api.expect(requestTo(ROOT + "/runs/42"))
+                .andRespond(withSuccess("""
+                        {"id":42,"workflow_id":3,"run_number":8,"run_attempt":1,
+                        "status":"completed","conclusion":"failure",
+                        "created_at":"2026-10-17T03:00:00Z"}
+                        """, MediaType.APPLICATION_JSON));
     }
 
     private String job(long id, String conclusion) {

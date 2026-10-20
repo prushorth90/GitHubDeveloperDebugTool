@@ -11,6 +11,7 @@ import com.githubci.intelligence.exceptions.GlobalExceptionHandler;
 import com.githubci.intelligence.services.GitHubService;
 import com.githubci.intelligence.services.FailureAnalyzerService;
 import com.githubci.intelligence.services.WorkflowRunAnalysisService;
+import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,7 @@ import org.springframework.web.client.RestClient;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
@@ -47,7 +49,8 @@ class GitHubControllerTest {
         server = MockRestServiceServer.bindTo(builder).build();
         GitHubService service = new GitHubService(builder.build(), RestClient.create(), "unit-test-token");
         mvc = MockMvcBuilders.standaloneSetup(new GitHubController(service,
-                        new WorkflowRunAnalysisService(service, new FailureAnalyzerService())))
+                        new WorkflowRunAnalysisService(service, new FailureAnalyzerService(),
+                                mock(WorkflowAnalysisRepository.class))))
                 .setControllerAdvice(new GlobalExceptionHandler(Clock.systemUTC())).build();
     }
 
