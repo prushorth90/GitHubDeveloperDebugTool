@@ -1,8 +1,9 @@
 # Architecture
 
 This repository provides a developer dashboard, backend health API, and GitHub
-Actions REST access with established component boundaries. It does not implement
-CI data ingestion, analysis, storage, end-user authentication, or AWS resources.
+Actions REST access and standalone deterministic failure analysis with established
+component boundaries. It does not implement automated CI data ingestion, storage,
+end-user authentication, or AWS resources.
 
 ## Backend
 
@@ -45,11 +46,24 @@ transport exceptions are not logged. Missing tokens disable only GitHub access,
 not application startup or health. See the [API documentation](../README.md#github-actions-api)
 for error statuses, limits, and deployment access-control requirements.
 
+`FailureAnalyzerService` analyzes supplied plain-text logs using precompiled
+regular expressions and bounded local context. It has no dependencies on GitHub,
+AWS, network clients or an AI provider, and can be constructed without Spring.
+Its immutable `FailureAnalysis` DTO separates observed diagnostics, line-numbered
+evidence and surrounding context from suspected causes and investigation advice.
+Specific diagnostics outrank build wrappers; equally strong conflicting categories
+remain unknown. PostgreSQL attribution requires connection-specific supporting
+evidence, not merely a generic network error. Analysis is not yet wired to an HTTP
+route or the frontend. See [local failure analysis](../README.md#local-failure-analysis)
+for the categories, confidence semantics and local test command.
+
 Tests cover the health contract with a fixed clock, JSON exception responses,
 Jakarta Bean Validation, full-context endpoint wiring, CORS, and production
 configuration without external services. Mocked GitHub HTTP responses cover
 pagination, DTO mapping, authentication, permissions, rate limiting, log download
 safety, and transport failures without network access or real credentials.
+Standalone analyzer tests cover each category, evidence extraction, wrapper
+precedence, ambiguous diagnostics and network-error false-positive protection.
 
 ## Frontend
 

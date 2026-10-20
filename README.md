@@ -1,7 +1,8 @@
 # GitHub CI Intelligence
 
 A full-stack developer tool with a GitHub Actions REST integration and developer
-dashboard. CI analysis, end-user authentication, and persistence are not implemented.
+dashboard and a deterministic CI failure analyzer. End-user authentication and
+persistence are not implemented.
 
 ## Technology
 
@@ -221,6 +222,50 @@ sample-data pages are not yet connected to these endpoints.
 Mocked HTTP tests cover pagination, DTO mapping, endpoint wiring, error responses,
 rate limits, unavailable logs, bounded downloads, and safe redirects without
 real tokens or calls to GitHub.
+
+### Local failure analysis
+
+`FailureAnalyzerService.analyze(String rawLogs)` accepts plain-text job logs and
+returns an immutable `FailureAnalysis` record. It is a Spring service but can also
+be constructed directly with `new FailureAnalyzerService()`; no Spring context,
+GitHub token, AWS credentials, network requests or paid AI APIs are required.
+It is not yet exposed through an HTTP endpoint or connected to the dashboard.
+
+The result contains:
+
+- `category`: `JAVA_COMPILATION`, `MAVEN_DEPENDENCY`, `JUNIT_TEST`,
+  `POSTGRESQL_CONNECTION`, `DOCKER_BUILD`, `AUTHENTICATION`,
+  `GITHUB_ACTIONS_CONFIGURATION`, or `UNKNOWN`.
+- `errorMessage`: the observed diagnostic, not an invented explanation. Logs
+  without a recognizable diagnostic receive an explicit absence message.
+- `suspectedCause` and `suggestedInvestigation`: hypotheses and next checks,
+  **not** confirmed root causes.
+- `confidence`: `HIGH` for specific diagnostics, `MEDIUM` for build/phase
+  wrappers, or `LOW` for unknown/conflicting evidence. These are heuristic
+  classification strengths, not statistical probabilities.
+- `evidence`: matching lines, including corroborating context when required.
+- `logContext`: up to two nonblank surrounding lines on either side of each
+  selected diagnostic, within the same Actions log section. Both lists preserve
+  one-based original line numbers; ANSI colors and Actions timestamps are removed.
+
+Specific diagnostics take precedence over generic Maven/Docker wrappers. Distinct
+categories with equally strong evidence produce `UNKNOWN` instead of guessing a
+single causal chain. PostgreSQL classification requires connection-specific
+PostgreSQL evidence on the diagnostic or within two lines in the same section;
+an unrelated service-start message, port 5432 alone, or `ECONNREFUSED` alone does
+not suffice. Explicit generic network targets are not associated with a different
+nearby PostgreSQL target. Echoed Actions commands are not treated as diagnostics.
+Null input is rejected with `IllegalArgumentException`; blank, successful and
+unrecognized logs return low-confidence `UNKNOWN` results.
+
+Run the standalone analyzer tests locally:
+
+```sh
+mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest test
+```
+
+Evidence and context can contain sensitive raw log content; treat the result
+with the same access controls as the source logs and do not log it automatically.
 
 ## Run the frontend
 
