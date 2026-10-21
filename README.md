@@ -6,6 +6,13 @@ in Amazon DynamoDB; sanitized, compressed job logs are stored in Amazon S3.
 Authenticated failed-workflow webhooks are queued in Amazon SQS for asynchronous processing.
 End-user authentication is not implemented.
 
+The [persisted analysis REST API](docs/analysis-api.md) provides repository
+discovery, paginated run/failure history, failure details, statistics and
+fingerprint-based similar failures. **Keep this unauthenticated API local or
+behind an access-controlled boundary until authorization is implemented.**
+Existing tables require the [read-index migration and backfill](docs/dynamodb.md#read-api-schema-and-migration)
+before using these routes.
+
 ## Technology
 
 - **Backend:** Java 21, Spring Boot 4.1.1, Maven.

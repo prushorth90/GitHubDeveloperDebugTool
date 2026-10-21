@@ -90,6 +90,20 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return error(exception.getStatus(), HttpHeaders.EMPTY, exception.getMessage(), request);
     }
 
+    @ExceptionHandler(FailureReadException.class)
+    public ResponseEntity<Object> handleFailureRead(FailureReadException exception, WebRequest request) {
+        if (exception.getStatus().is5xxServerError()) {
+            log.error("Persisted analysis retrieval failed", exception);
+        } else {
+            log.warn("Persisted analysis query rejected: {}", exception.getMessage());
+        }
+        HttpHeaders headers = new HttpHeaders();
+        if (exception.getStatus() == HttpStatus.SERVICE_UNAVAILABLE) {
+            headers.set(HttpHeaders.RETRY_AFTER, "30");
+        }
+        return error(exception.getStatus(), headers, exception.getMessage(), request);
+    }
+
     private ResponseEntity<Object> error(
             HttpStatusCode status, HttpHeaders headers, String message, WebRequest request) {
         String path = ((ServletWebRequest) request).getRequest().getRequestURI();

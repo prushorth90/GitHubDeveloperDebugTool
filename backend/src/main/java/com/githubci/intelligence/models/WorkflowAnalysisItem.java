@@ -21,8 +21,11 @@ public class WorkflowAnalysisItem {
     private String createdAt;
     private String updatedAt;
     private String leaseUntil;
+    private String runSk;
+    private String repositoryDetails;
 
     @DynamoDbPartitionKey
+    @DynamoDbSecondaryPartitionKey(indexNames = "repository-runs")
     public String getPk() { return pk; }
     public void setPk(String pk) { this.pk = pk; }
 
@@ -61,4 +64,11 @@ public class WorkflowAnalysisItem {
 
     public String getLeaseUntil() { return leaseUntil; }
     public void setLeaseUntil(String leaseUntil) { this.leaseUntil = leaseUntil; }
+
+    @DynamoDbSecondarySortKey(indexNames = "repository-runs")
+    public String getRunSk() { return runSk; }
+    public void setRunSk(String runSk) { this.runSk = runSk; }
+
+    public String getRepositoryDetails() { return repositoryDetails; }
+    public void setRepositoryDetails(String repositoryDetails) { this.repositoryDetails = repositoryDetails; }
 }

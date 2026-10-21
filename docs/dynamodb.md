@@ -37,8 +37,10 @@ mvn -f backend/pom.xml spring-boot:run
 Alternatively, `docker compose up --build` configures the backend's internal
 endpoint and dummy credentials automatically. The backend waits for the
 initializer to succeed. `docker/dynamodb/create-tables.sh` retries readiness for
-up to 30 attempts, creates an absent table and its GSI, waits for table existence,
-and reports the resulting schema. Running it again preserves existing data.
+up to 30 attempts, creates an absent table and its GSIs, adds a missing
+`repository-runs` index to existing development tables, waits for table existence
+and the read index to become active, and reports the resulting schema.
+Running it again preserves existing data.
 Failures exit nonzero and prevent backend startup.
 
 DynamoDB Local uses `-sharedDb` and a named volume; the local-only container runs
@@ -51,16 +53,18 @@ removing the database volume intentionally deletes development records.
 
 Provision the following schema through your deployment tooling before starting
 the backend; the CDK stack provisions the S3 log bucket, not the table. Use
-`PAY_PER_REQUEST`, string attributes `pk`, `sk`, `failurePk`, `failureSk`, a
+`PAY_PER_REQUEST`, string attributes `pk`, `sk`, `failurePk`, `failureSk`, `runSk`, a
 table key of `pk` (HASH) / `sk` (RANGE), and the `recent-failures` GSI described
-below. The development script contains the equivalent `create-table` definition,
+below, plus the `repository-runs` GSI in the read schema below.
+The development script contains the equivalent `create-table` definition,
 but is not a production migration tool. Existing incompatible tables require an
 explicit schema migration, not automatic recreation.
 
 Set `SPRING_PROFILES_ACTIVE=prod`, `AWS_REGION`, and `DYNAMODB_TABLE_NAME`;
 **unset** `DYNAMODB_ENDPOINT`. Grant the backend role `dynamodb:GetItem` and
-`dynamodb:PutItem` and `dynamodb:UpdateItem` on the table, and `dynamodb:Query` on
-`table/<name>/index/recent-failures`. It needs neither table creation nor scan
+`dynamodb:PutItem`, `dynamodb:UpdateItem`, and `dynamodb:Query` on the table,
+and `dynamodb:Query` on `table/<name>/index/recent-failures` and
+`table/<name>/index/repository-runs`. It needs neither table creation nor scan
 permissions. Configure encryption, backup/retention and access controls to suit
 your deployment. Compose deliberately targets Local, even with the Spring `prod`
 profile; deploy the backend separately for real AWS.
@@ -112,7 +116,8 @@ Run ID/attempt break ties deterministically. Chronology means **workflow creatio
 time**, not analysis completion order. Rerun attempts are distinct records but
 share GitHub's original creation time. The repository reads 1-100 recent records,
 following DynamoDB pages as necessary; this is a bounded top-N operation, not a
-public cursor-paginated API. No scan or filter expression is needed. GSI updates
+public cursor-paginated API. The separate read API adds cursor pagination as
+described below. No scan or filter expression is needed. GSI updates
 can lag; use the strongly consistent point read to confirm an immediate write.
 
 The run metadata plus serialized analysis must fit a **350 KiB UTF-8 payload
@@ -162,6 +167,73 @@ skips all GitHub/S3 work. A crash before completion allows takeover after expiry
 The worker retrieves metadata and jobs for the event's exact attempt, avoiding a
 race with a newer rerun. See [SQS operation and recovery](../README.md#asynchronous-worker-retries-and-recovery)
 for acknowledgement, backoff, DLQ, IAM and local test details.
+
+## Read API schema and migration
+
+The [persisted analysis API](analysis-api.md) adds:
+
+- Catalog items: `pk=REPOSITORIES`,
+  `sk=REPOSITORY#<20-digit GitHub repository ID>`, with `repositoryDetails`
+  containing repository metadata JSON. Claims upsert this metadata. These items
+  are queried directly, not scanned, and have no GSI sort keys.
+- A sparse `repository-runs` GSI: string HASH key `pk`, string RANGE key `runSk`,
+  `ALL` projection. Every workflow analysis attempt, regardless of status, has
+  `runSk=<UTC workflow createdAt>#<base-table sk>` using the same millisecond
+  timestamp format and fallback as `failureSk`. Event ledger and catalog items
+  do not occupy this index.
+- Strongly consistent base-table prefix queries to select the latest persisted
+  attempt of a run. Existing per-attempt keys and lease fencing are unchanged.
+
+Normal reads require `Query` on the table and both indexes, in addition to the
+existing item permissions. No normal read uses `Scan`; category/similarity
+filtering is applied within a bounded query page. Statistics traverse all pages
+of a single repository index partition.
+
+For an **existing production table**, deploy the new index using your schema
+management tooling, equivalent to:
+
+```sh
+aws dynamodb update-table --table-name "$DYNAMODB_TABLE_NAME" \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=runSk,AttributeType=S \
+  --global-secondary-index-updates \
+  '[{"Create":{"IndexName":"repository-runs","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"runSk","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]'
+```
+
+Skip creation if already present. Wait until the index is `ACTIVE` (check
+`describe-table`, not just table existence). The Local initializer creates both
+indexes on new tables and adds this index to older development tables; it does
+not backfill application attributes.
+
+Then perform an explicit maintenance backfill:
+
+1. Back up the table and stop **all** analysis writers/workers; do not route read
+   traffic to the new API yet.
+2. Temporarily grant the maintenance role `dynamodb:Scan` along with item write
+   permissions. This permission is not required by the normal backend role.
+3. Build the backend and run it in non-web maintenance mode using the intended
+   table/region/credentials (and endpoint override only for Local):
+
+   ```sh
+   mvn -f backend/pom.xml -DskipTests package
+   java -jar backend/target/github-ci-intelligence-backend.jar \
+     --spring.main.web-application-type=none \
+     --app.sqs.worker-enabled=false \
+     --app.dynamodb.backfill-read-metadata=true
+   ```
+
+4. Confirm the logged backfilled count and successful exit, and verify catalog
+   and chronological query visibility after GSI propagation.
+5. Remove the maintenance permission/property and restart normally with the new
+   writer version before enabling read traffic.
+
+Backfill explicitly scans existing `REPO#...` / `RUN#...` items, ignores event
+ledger/catalog items, writes repository metadata, and updates **only** `runSk`.
+It preserves payloads, state, leases, ownership and existing timestamps. It is
+idempotent, fails explicitly on invalid stored data/database errors, and can be
+rerun after a partial failure. It is not automatically enabled by startup and
+must not run concurrently with writers. Without backfill, legacy attempts lack
+catalog/index metadata and will not be visible through the new discovery/run
+routes. Normal startup does not create, modify or validate the table schema.
 
 ## Tests
 

@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.githubci.intelligence.dto.GitHubWorkflowRun;
+import com.githubci.intelligence.dto.GitHubRepository;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis;
 import com.githubci.intelligence.exceptions.AnalysisConflictException;
 import com.githubci.intelligence.models.AnalysisStatus;
@@ -34,6 +35,8 @@ import tools.jackson.databind.ObjectMapper;
 public class WorkflowAnalysisRepository {
 
     public static final String RECENT_FAILURES_INDEX = "recent-failures";
+    public static final String RUNS_INDEX = "repository-runs";
+    private static final String CATALOG = "REPOSITORIES";
     private static final DateTimeFormatter TIMESTAMP = new DateTimeFormatterBuilder().appendInstant(3).toFormatter();
     private static final int MAX_PAYLOAD_BYTES = 350 * 1024;
     private final DynamoDbTable<WorkflowAnalysisItem> table;
@@ -61,6 +64,7 @@ public class WorkflowAnalysisRepository {
     public Claim claim(String repository, GitHubWorkflowRun run) {
         validateRun(run);
         WorkflowAnalysisItem item = newItem(repository, run);
+        saveRepository(run.repository());
         try {
             put(item, Expression.builder().expression("attribute_not_exists(pk)").build());
             return new Claim(decode(item), item.getProcessingToken());
@@ -74,6 +78,7 @@ public class WorkflowAnalysisRepository {
                 return new Claim(decode(existing), null);
             }
             item.setCreatedAt(existing.getCreatedAt());
+            item.setRunSk(chronology(run, Instant.parse(existing.getCreatedAt()), item.getSk()));
             Expression retry = Expression.builder()
                     .expression("#state = :failed OR (#state = :processing AND leaseUntil <= :now)")
                     .expressionNames(Map.of("#state", "status"))
@@ -156,6 +161,87 @@ public class WorkflowAnalysisRepository {
                 .stream().flatMap(page -> page.items().stream()).limit(limit).map(this::decode).toList();
     }
 
+    public record ReadPage<T>(List<T> items, Map<String, AttributeValue> nextKey) {
+        public ReadPage {
+            items = List.copyOf(items);
+            nextKey = nextKey == null ? Map.of() : Map.copyOf(nextKey);
+        }
+    }
+
+    public ReadPage<GitHubRepository> repositories(int limit, Map<String, AttributeValue> start) {
+        var page = table.query(request -> request
+                .queryConditional(QueryConditional.keyEqualTo(Key.builder().partitionValue(CATALOG).build()))
+                .consistentRead(true).limit(limit).exclusiveStartKey(start)).iterator().next();
+        return new ReadPage<>(page.items().stream()
+                .map(item -> mapper.readValue(item.getRepositoryDetails(), GitHubRepository.class)).toList(),
+                page.lastEvaluatedKey());
+    }
+
+    public Optional<GitHubRepository> repository(long id) {
+        return Optional.ofNullable(table.getItem(request -> request
+                .key(Key.builder().partitionValue(CATALOG).sortValue(repositoryKey(id)).build())
+                .consistentRead(true)))
+                .map(item -> mapper.readValue(item.getRepositoryDetails(), GitHubRepository.class));
+    }
+
+    public ReadPage<StoredWorkflowAnalysis> runs(
+            String repository, boolean failuresOnly, boolean ascending, int limit,
+            Map<String, AttributeValue> start) {
+        var page = table.index(failuresOnly ? RECENT_FAILURES_INDEX : RUNS_INDEX)
+                .query(request -> request.queryConditional(QueryConditional.keyEqualTo(
+                                Key.builder().partitionValue(partition(repository)).build()))
+                        .scanIndexForward(ascending).limit(limit).exclusiveStartKey(start))
+                .iterator().next();
+        return new ReadPage<>(page.items().stream().map(this::decode).toList(), page.lastEvaluatedKey());
+    }
+
+    public Optional<StoredWorkflowAnalysis> latestRun(String repository, long runId) {
+        return table.query(request -> request.queryConditional(QueryConditional.sortBeginsWith(
+                        Key.builder().partitionValue(partition(repository))
+                                .sortValue(String.format(Locale.ROOT, "RUN#%020d#ATTEMPT#", runId)).build()))
+                        .consistentRead(true).scanIndexForward(false).limit(1))
+                .items().stream().findFirst().map(this::decode);
+    }
+
+    // Run only as an explicit maintenance operation with writers stopped.
+    public long backfillReadMetadata() {
+        long count = 0;
+        for (WorkflowAnalysisItem item : table.scan().items()) {
+            if (!item.getPk().startsWith("REPO#") || !item.getSk().startsWith("RUN#")) {
+                continue;
+            }
+            StoredWorkflowAnalysis stored = decode(item);
+            saveRepository(stored.workflowRun().repository());
+            WorkflowAnalysisItem update = new WorkflowAnalysisItem();
+            update.setPk(item.getPk());
+            update.setSk(item.getSk());
+            update.setRunSk(chronology(stored.workflowRun(), stored.createdAt(), item.getSk()));
+            table.updateItem(request -> request.item(update).ignoreNulls(true)
+                    .conditionExpression(Expression.builder().expression("attribute_exists(pk)").build()));
+            count++;
+        }
+        return count;
+    }
+
+    private void saveRepository(GitHubRepository repository) {
+        if (repository == null || repository.id() <= 0) {
+            throw new IllegalArgumentException("Persisted workflow must contain a positive repository ID");
+        }
+        WorkflowAnalysisItem catalog = new WorkflowAnalysisItem();
+        catalog.setPk(CATALOG);
+        catalog.setSk(repositoryKey(repository.id()));
+        catalog.setRepositoryDetails(mapper.writeValueAsString(repository));
+        table.putItem(catalog);
+    }
+
+    private static String repositoryKey(long id) {
+        return String.format(Locale.ROOT, "REPOSITORY#%020d", id);
+    }
+
+    private static String chronology(GitHubWorkflowRun run, Instant fallback, String sk) {
+        return TIMESTAMP.format(run.createdAt() == null ? fallback : run.createdAt()) + "#" + sk;
+    }
+
     private WorkflowAnalysisItem newItem(String repository, GitHubWorkflowRun run) {
         WorkflowAnalysisItem item = new WorkflowAnalysisItem();
         item.setPk(partition(repository));
@@ -165,6 +251,7 @@ public class WorkflowAnalysisRepository {
         item.setStatus(AnalysisStatus.PROCESSING.name());
         item.setProcessingToken(UUID.randomUUID().toString());
         item.setCreatedAt(TIMESTAMP.format(clock.instant()));
+        item.setRunSk(chronology(run, clock.instant(), item.getSk()));
         item.setUpdatedAt(item.getCreatedAt());
         item.setLeaseUntil(TIMESTAMP.format(clock.instant().plus(lease)));
         return item;
@@ -176,6 +263,7 @@ public class WorkflowAnalysisRepository {
         }
         WorkflowAnalysisItem item = newItem(claim.record().repository(), claim.record().workflowRun());
         item.setCreatedAt(TIMESTAMP.format(claim.record().createdAt()));
+        item.setRunSk(chronology(claim.record().workflowRun(), claim.record().createdAt(), item.getSk()));
         item.setStatus(status.name());
         item.setProcessingToken(null);
         item.setLeaseUntil(null);

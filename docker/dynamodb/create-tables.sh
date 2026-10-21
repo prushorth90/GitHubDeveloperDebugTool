@@ -27,13 +27,40 @@ if [ "$exists" = false ]; then
     --attribute-definitions \
       AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
       AttributeName=failurePk,AttributeType=S AttributeName=failureSk,AttributeType=S \
+      AttributeName=runSk,AttributeType=S \
     --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
     --global-secondary-indexes \
-      '[{"IndexName":"recent-failures","KeySchema":[{"AttributeName":"failurePk","KeyType":"HASH"},{"AttributeName":"failureSk","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]'
+      '[{"IndexName":"recent-failures","KeySchema":[{"AttributeName":"failurePk","KeyType":"HASH"},{"AttributeName":"failureSk","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}},{"IndexName":"repository-runs","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"runSk","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]'
+else
+  index=$(aws dynamodb describe-table --endpoint-url "$DYNAMODB_ENDPOINT" \
+    --table-name "$DYNAMODB_TABLE_NAME" \
+    --query "Table.GlobalSecondaryIndexes[?IndexName=='repository-runs'].IndexName | [0]" --output text)
+  if [ "$index" != repository-runs ]; then
+    aws dynamodb update-table --endpoint-url "$DYNAMODB_ENDPOINT" \
+      --table-name "$DYNAMODB_TABLE_NAME" \
+      --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=runSk,AttributeType=S \
+      --global-secondary-index-updates \
+        '[{"Create":{"IndexName":"repository-runs","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"runSk","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]'
+  fi
 fi
 
 aws dynamodb wait table-exists --endpoint-url "$DYNAMODB_ENDPOINT" \
   --table-name "$DYNAMODB_TABLE_NAME"
+attempt=0
+while :; do
+  index_status=$(aws dynamodb describe-table --endpoint-url "$DYNAMODB_ENDPOINT" \
+    --table-name "$DYNAMODB_TABLE_NAME" \
+    --query "Table.GlobalSecondaryIndexes[?IndexName=='repository-runs'].IndexStatus | [0]" --output text)
+  if [ "$index_status" = ACTIVE ]; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    echo "DynamoDB Local repository-runs index did not become active" >&2
+    exit 1
+  fi
+  sleep 2
+done
 aws dynamodb describe-table --endpoint-url "$DYNAMODB_ENDPOINT" \
   --table-name "$DYNAMODB_TABLE_NAME" \
   --query 'Table.{Status:TableStatus,Indexes:GlobalSecondaryIndexes[].IndexName}'

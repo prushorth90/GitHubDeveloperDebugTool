@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +21,9 @@ import com.githubci.intelligence.dto.WorkflowRunAnalysis.FailedJobAnalysis;
 import com.githubci.intelligence.dto.WorkflowRunAnalysis.LogStatus;
 import com.githubci.intelligence.exceptions.AnalysisConflictException;
 import com.githubci.intelligence.exceptions.GitHubException;
+import com.githubci.intelligence.exceptions.GlobalExceptionHandler;
+import com.githubci.intelligence.controllers.RepositoryController;
+import com.githubci.intelligence.services.FailureService;
 import com.githubci.intelligence.models.AnalysisStatus;
 import com.githubci.intelligence.services.FailureAnalyzerService;
 import com.githubci.intelligence.services.GitHubService;
@@ -32,6 +36,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -64,6 +70,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 
 @Testcontainers
 class WorkflowAnalysisRepositoryIT {
@@ -83,6 +93,7 @@ class WorkflowAnalysisRepositoryIT {
     private static DynamoDbEnhancedClient enhanced;
     private String tableName;
     private WorkflowAnalysisRepository repository;
+    private MockMvc mvc;
 
     @BeforeAll
     static void connect() {
@@ -106,14 +117,21 @@ class WorkflowAnalysisRepositoryIT {
     void createTable() {
         tableName = "workflow-analyses-test-" + UUID.randomUUID();
         client.createTable(request -> request.tableName(tableName).billingMode(BillingMode.PAY_PER_REQUEST)
-                .attributeDefinitions(attribute("pk"), attribute("sk"), attribute("failurePk"), attribute("failureSk"))
+                .attributeDefinitions(attribute("pk"), attribute("sk"), attribute("failurePk"), attribute("failureSk"),
+                        attribute("runSk"))
                 .keySchema(key("pk", KeyType.HASH), key("sk", KeyType.RANGE))
                 .globalSecondaryIndexes(GlobalSecondaryIndex.builder()
                         .indexName(WorkflowAnalysisRepository.RECENT_FAILURES_INDEX)
                         .keySchema(key("failurePk", KeyType.HASH), key("failureSk", KeyType.RANGE))
-                        .projection(projection -> projection.projectionType(ProjectionType.ALL)).build()));
+                        .projection(projection -> projection.projectionType(ProjectionType.ALL)).build(),
+                        GlobalSecondaryIndex.builder().indexName(WorkflowAnalysisRepository.RUNS_INDEX)
+                                .keySchema(key("pk", KeyType.HASH), key("runSk", KeyType.RANGE))
+                                .projection(projection -> projection.projectionType(ProjectionType.ALL)).build()));
         client.waiter().waitUntilTableExists(request -> request.tableName(tableName));
         repository = repositoryAt(NOW);
+        mvc = MockMvcBuilders.standaloneSetup(new RepositoryController(
+                        new FailureService(repository, JsonMapper.builder().build())))
+                .setControllerAdvice(new GlobalExceptionHandler(Clock.fixed(NOW, ZoneOffset.UTC))).build();
     }
 
     @AfterEach
@@ -325,6 +343,180 @@ class WorkflowAnalysisRepositoryIT {
         assertEquals(AnalysisStatus.FAILED, repository.findRun(REPOSITORY, 42, 1).orElseThrow().status());
         assertEquals(empty(42), service.analyze("octo", "demo", 42));
         verify(github, never()).getFailedJobLogs("octo", "demo", 7);
+    }
+
+    @Test
+    void repositoryEndpointListsPersistedMetadataAndPaginates() throws Exception {
+        repository.claim(REPOSITORY, run(42, 1, NOW));
+        var other = new GitHubWorkflowRun(43, "CI", 3, 43, 1, "push", "completed", "success",
+                "main", "sha", null, NOW, NOW,
+                new GitHubRepository(2, "other", "octo/other", null, false));
+        repository.claim("octo/other", other);
+        String body = mvc.perform(get("/api/repositories").param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].id").value(1))
+                .andExpect(jsonPath("$.data.items[0].fullName").value(REPOSITORY))
+                .andExpect(jsonPath("$.data.items[0].pk").doesNotExist())
+                .andReturn().getResponse().getContentAsString();
+        String token = JsonMapper.builder().build().readTree(body).path("data").path("nextToken").asString();
+        mvc.perform(get("/api/repositories").param("limit", "1").param("nextToken", token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].id").value(2));
+    }
+
+    @Test
+    void runsEndpointUsesChronologyRatherThanRunIdAndKeepsAttemptsDistinct() throws Exception {
+        repository.complete(repository.claim(REPOSITORY, run(99, 1, NOW.minusSeconds(90))), empty(99));
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), failure(42));
+        repository.claim(REPOSITORY, run(42, 2, NOW));
+        String body = mvc.perform(get("/api/repositories/1/runs").param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].runId").value(42))
+                .andExpect(jsonPath("$.data.items[0].attempt").value(2))
+                .andExpect(jsonPath("$.data.items[0].analysisStatus").value("PROCESSING"))
+                .andExpect(jsonPath("$.data.items[0].analysisComplete").value(false))
+                .andReturn().getResponse().getContentAsString();
+        String token = JsonMapper.builder().build().readTree(body).path("data").path("nextToken").asString();
+        mvc.perform(get("/api/repositories/1/runs").param("limit", "1").param("nextToken", token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].attempt").value(1));
+        mvc.perform(get("/api/repositories/1/runs").param("order", "asc"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].runId").value(99));
+        mvc.perform(get("/api/repositories/1/runs").param("category", "JAVA_COMPILATION"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items.length()").value(1));
+    }
+
+    @Test
+    void failuresEndpointFiltersAndCanReturnEmptyPagesWithContinuation() throws Exception {
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), failure(42));
+        repository.complete(repository.claim(REPOSITORY, run(43, 1, NOW.plusSeconds(10))),
+                new WorkflowRunAnalysis(REPOSITORY, 43, List.of(new FailedJobAnalysis(
+                        job(43), LogStatus.UNAVAILABLE, "Expired", null, null))));
+        repository.complete(repository.claim(REPOSITORY, run(44, 1, NOW.plusSeconds(20))), empty(44));
+        String body = mvc.perform(get("/api/repositories/1/failures")
+                        .param("category", "JAVA_COMPILATION").param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items").isEmpty())
+                .andExpect(jsonPath("$.data.nextToken").isString())
+                .andReturn().getResponse().getContentAsString();
+        String token = JsonMapper.builder().build().readTree(body).path("data").path("nextToken").asString();
+        mvc.perform(get("/api/repositories/1/failures").param("category", "JAVA_COMPILATION")
+                        .param("limit", "1").param("nextToken", token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].runId").value(42));
+        mvc.perform(get("/api/repositories/1/failures"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items.length()").value(2));
+    }
+
+    @Test
+    void detailEndpointHandlesLatestAttemptsPartialAnalysisAndMissingRecords() throws Exception {
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), failure(42));
+        mvc.perform(get("/api/repositories/1/failures/42"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.failedJobs[0].analysis.category")
+                        .value("JAVA_COMPILATION"))
+                .andExpect(jsonPath("$.data.failedJobs[0].logObjectKey").doesNotExist())
+                .andExpect(jsonPath("$.data.run.analysisComplete").value(true));
+        var second = repository.claim(REPOSITORY, run(42, 2, NOW));
+        mvc.perform(get("/api/repositories/1/failures/42")).andExpect(status().isConflict());
+        mvc.perform(get("/api/repositories/1/failures/42").param("attempt", "1")).andExpect(status().isOk());
+        repository.fail(second);
+        mvc.perform(get("/api/repositories/1/failures/42")).andExpect(status().isConflict());
+        repository.complete(repository.claim(REPOSITORY, run(42, 2, NOW)),
+                new WorkflowRunAnalysis(REPOSITORY, 42, List.of(new FailedJobAnalysis(
+                        job(42), LogStatus.UNAVAILABLE, "Expired", null, null))));
+        mvc.perform(get("/api/repositories/1/failures/42"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.run.analysisComplete").value(false))
+                .andExpect(jsonPath("$.data.failedJobs[0].logMessage").value("Expired"));
+        mvc.perform(get("/api/repositories/1/failures/999")).andExpect(status().isNotFound());
+        mvc.perform(get("/api/repositories/999/statistics")).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void statisticsEndpointAggregatesEveryPageIncludingProcessingAndUnavailableAnalyses() throws Exception {
+        for (int i = 1; i <= 102; i++) {
+            repository.complete(repository.claim(REPOSITORY, run(i, 1, NOW)), failure(i));
+        }
+        repository.claim(REPOSITORY, run(200, 1, NOW));
+        repository.fail(repository.claim(REPOSITORY, run(201, 1, NOW)));
+        repository.complete(repository.claim(REPOSITORY, run(202, 1, NOW)),
+                new WorkflowRunAnalysis(REPOSITORY, 202, List.of(new FailedJobAnalysis(
+                        job(202), LogStatus.UNAVAILABLE, "Expired", null, null))));
+        mvc.perform(get("/api/repositories/1/statistics"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.totalRuns").value(105))
+                .andExpect(jsonPath("$.data.completedAnalyses").value(103))
+                .andExpect(jsonPath("$.data.processingAnalyses").value(1))
+                .andExpect(jsonPath("$.data.failedAnalyses").value(1))
+                .andExpect(jsonPath("$.data.failureRuns").value(103))
+                .andExpect(jsonPath("$.data.unavailableJobAnalyses").value(1))
+                .andExpect(jsonPath("$.data.failuresByCategory.JAVA_COMPILATION").value(102));
+    }
+
+    @Test
+    void similarEndpointMatchesFingerprintsWithoutReturningSourceOrOtherRepositories() throws Exception {
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), failure(42));
+        repository.complete(repository.claim(REPOSITORY, run(42, 2, NOW)), failure(42));
+        repository.complete(repository.claim(REPOSITORY, run(43, 1, NOW.minusSeconds(10))), failure(43));
+        repository.complete(repository.claim(REPOSITORY, run(44, 1, NOW.minusSeconds(20))),
+                new WorkflowRunAnalysis(REPOSITORY, 44, List.of(new FailedJobAnalysis(
+                        job(44), LogStatus.AVAILABLE, null, ANALYZER.analyze("unrelated failure"), null))));
+        var other = new GitHubWorkflowRun(45, "CI", 3, 45, 1, "push", "completed", "failure",
+                "main", "sha", null, NOW, NOW,
+                new GitHubRepository(2, "other", "octo/other", null, false));
+        repository.complete(repository.claim("octo/other", other),
+                new WorkflowRunAnalysis("octo/other", 45, failure(45).failedJobs()));
+        mvc.perform(get("/api/repositories/1/failures/42/similar"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items.length()").value(1))
+                .andExpect(jsonPath("$.data.items[0].runId").value(43));
+        String body = mvc.perform(get("/api/repositories/1/failures/42/similar").param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items").isEmpty())
+                .andExpect(jsonPath("$.data.nextToken").isString())
+                .andReturn().getResponse().getContentAsString();
+        String token = JsonMapper.builder().build().readTree(body).path("data").path("nextToken").asString();
+        mvc.perform(get("/api/repositories/1/failures/42/similar").param("limit", "1").param("nextToken", token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.items").isEmpty())
+                .andExpect(jsonPath("$.data.nextToken").isString());
+    }
+
+    @Test
+    void endpointsReturnStandardErrorsForInvalidParametersAndDatabaseFailures() throws Exception {
+        repository.claim(REPOSITORY, run(42, 1, NOW));
+        for (String path : List.of("/runs", "/failures", "/failures/42", "/statistics", "/failures/42/similar")) {
+            mvc.perform(get("/api/repositories/999" + path))
+                    .andExpect(status().isNotFound()).andExpect(jsonPath("$.message").value("Repository not found"));
+        }
+        for (String suffix : List.of("/runs?limit=0", "/failures?category=INVALID",
+                "/runs?order=invalid", "/runs?nextToken=bad", "/failures/42?attempt=0",
+                "/failures/42/similar?limit=101")) {
+            mvc.perform(get("/api/repositories/1" + suffix))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value(400))
+                    .andExpect(jsonPath("$.timestamp").exists()).andExpect(jsonPath("$.path").exists());
+        }
+        var missing = new WorkflowAnalysisRepository(enhanced, JsonMapper.builder().build(),
+                Clock.fixed(NOW, ZoneOffset.UTC), "missing-" + UUID.randomUUID(), LEASE);
+        var unavailableMvc = MockMvcBuilders.standaloneSetup(new RepositoryController(
+                        new FailureService(missing, JsonMapper.builder().build())))
+                .setControllerAdvice(new GlobalExceptionHandler(Clock.fixed(NOW, ZoneOffset.UTC))).build();
+        for (String path : List.of("", "/1/runs", "/1/failures", "/1/failures/42",
+                "/1/statistics", "/1/failures/42/similar")) {
+            unavailableMvc.perform(get("/api/repositories" + path))
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(header().string("Retry-After", "30"))
+                    .andExpect(jsonPath("$.message").value("Analysis database is temporarily unavailable"));
+        }
+    }
+
+    @Test
+    void backfillMakesLegacyRecordsVisibleAndIsIdempotent() {
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW)), failure(42));
+        var legacy = client.scan(request -> request.tableName(tableName)).items().stream()
+                .filter(item -> item.get("pk").s().startsWith("REPO#")).findFirst().orElseThrow();
+        var key = Map.of("pk", legacy.get("pk"), "sk", legacy.get("sk"));
+        client.updateItem(request -> request.tableName(tableName).key(key).updateExpression("REMOVE runSk"));
+        client.deleteItem(request -> request.tableName(tableName).key(Map.of(
+                "pk", software.amazon.awssdk.services.dynamodb.model.AttributeValue.builder().s("REPOSITORIES").build(),
+                "sk", software.amazon.awssdk.services.dynamodb.model.AttributeValue.builder()
+                        .s("REPOSITORY#00000000000000000001").build())));
+        assertTrue(repository.repository(1).isEmpty());
+        assertTrue(repository.runs(REPOSITORY, false, false, 20, Map.of()).items().isEmpty());
+        assertEquals(1, repository.backfillReadMetadata());
+        assertEquals(1, repository.backfillReadMetadata());
+        assertEquals(1, repository.repositories(20, Map.of()).items().size());
+        assertEquals(1, repository.runs(REPOSITORY, false, false, 20, Map.of()).items().size());
+        assertEquals(failure(42), repository.findRun(REPOSITORY, 42, 1).orElseThrow().analysis());
     }
 
     private WorkflowAnalysisRepository repositoryAt(Instant time) {
