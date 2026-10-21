@@ -24,7 +24,7 @@ import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import tools.jackson.core.JacksonException;
-// analytic service
+// analytic  
 @Service
 public class AnalyticsService {
     private final WorkflowAnalysisRepository repository;
