@@ -3,7 +3,7 @@
 This repository provides a developer dashboard, backend health API, and GitHub
 Actions REST access and standalone deterministic failure analysis with established
 component boundaries, DynamoDB analysis persistence, and S3 job log storage.
-Failed-workflow webhooks drive asynchronous CI ingestion through SQS.
+Completed-workflow webhooks drive asynchronous CI ingestion through SQS.
 End-user authentication is not implemented.
 
 ## Backend
@@ -44,7 +44,8 @@ attempt's jobs, and conditionally commits the result. Completed results are
 reused; failed or lease-expired work is retryable. Token-fenced conditional
 writes prevent stale workers from overwriting newer results. A sparse GSI lists
 completed failures by workflow creation time. See [DynamoDB access patterns](dynamodb.md).
-`GitHubWebhookService` authenticates and validates failed-workflow events and
+Non-failed completed attempts retain metadata without fetching jobs or logs.
+`GitHubWebhookService` authenticates and validates completed-workflow events and
 publishes `WorkflowEvent` messages before acknowledging HTTP requests.
 `SqsWorkflowEventConsumer` polls SQS and calls the transport-independent
 `WorkflowEventWorker`. A separate ID/run/attempt ledger in DynamoDB fences
@@ -52,6 +53,13 @@ concurrent deliveries and tracks `PROCESSING`/`FAILED`/`COMPLETED` states.
 Heartbeat renewal, retry backoff and native SQS DLQ redrive support recovery.
 Messages are deleted only after all required work and durable completion.
 The existing synchronous analysis route remains available.
+
+`AnalyticsController` delegates time-windowed aggregation to `AnalyticsService`.
+It queries the repository-runs GSI with date bounds and streams database pages,
+returning only daily rates, category counts and summary metrics. The React
+Analytics page uses Material UI and Recharts, with repository and 7/30/90-day
+filters, query caching, explicit refresh/retry, and accessible chart data tables.
+See [analytics definitions and data coverage](analysis-api.md#historical-analytics).
 
 `GitHubConfiguration` provides timeout-bounded `RestClient` instances with
 automatic redirects disabled. Authenticated API calls are restricted to
@@ -119,8 +127,10 @@ indicators. The centralized Axios client uses public, build-time
 8-second timeout. Health responses are validated before rendering; transport
 and payload failures are surfaced, not replaced with demo success.
 The health query polls every 30 seconds and supports manual retries.
-Other pages use local demo fixtures; search, repository filters, and period
-selectors do not make API requests. No component test framework is configured.
+Overview and Repositories share cached persisted catalog/statistics queries.
+Analytics shares the catalog and requests server-side windowed aggregates when
+its repository or period changes. Workflow Failures still uses labeled demo
+fixtures. Vitest and Testing Library cover API clients and dashboard states.
 
 ## Infrastructure and operations
 

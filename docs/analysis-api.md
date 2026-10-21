@@ -24,6 +24,7 @@ Storage entities, leases, processing tokens and S3 object keys are not returned.
 | `/api/repositories/{repositoryId}/failures` | Page of completed analyses with at least one failed/timed-out job | `limit`, `nextToken`, `order`, `category` |
 | `/api/repositories/{repositoryId}/failures/{runId}` | Run summary and failed-job analysis DTOs | `attempt` |
 | `/api/repositories/{repositoryId}/statistics` | Repository-wide attempt/job counts | none |
+| `/api/repositories/{repositoryId}/analytics` | Time-windowed summary, daily failure rates and category counts | `days` (7, 30 or 90; default 7) |
 | `/api/repositories/{repositoryId}/failures/{runId}/similar` | Page of other run summaries with a matching stored fingerprint | `attempt`, `limit`, `nextToken`, `order`, `category` |
 
 Examples:
@@ -123,6 +124,83 @@ its `analyzedAt` is not necessarily the repository's `lastAnalyzedAt`. Both fiel
 are computed during the existing statistics traversal with no additional reads.
 The dashboard fetches statistics only for visible repositories, caches them for
 five minutes, and refreshes only on explicit user action or a stale mount.
+
+### Historical analytics
+
+`GET /api/repositories/{repositoryId}/analytics?days=30` returns only aggregates
+in the standard `data` envelope:
+
+```json
+{
+  "data": {
+    "from": "2026-10-14T00:00:00Z",
+    "until": "2026-10-20T12:00:00Z",
+    "totalRuns": 10,
+    "failedRuns": 2,
+    "recurringFailures": 1,
+    "successfulAnalyses": 2,
+    "dailyRates": [
+      {"date": "2026-10-14", "totalRuns": 10, "failedRuns": 2, "failureRate": 20.0}
+    ],
+    "failuresByCategory": {
+      "JAVA_COMPILATION": 2,
+      "MAVEN_DEPENDENCY": 0,
+      "JUNIT_TEST": 0,
+      "POSTGRESQL_CONNECTION": 0,
+      "DOCKER_BUILD": 0,
+      "AUTHENTICATION": 0,
+      "GITHUB_ACTIONS_CONFIGURATION": 0,
+      "UNKNOWN": 0
+    }
+  }
+}
+```
+
+The example abbreviates `dailyRates`: responses always include exactly 7, 30 or
+90 ordered UTC calendar days, including today. The interval is inclusive of
+midnight on the first day and exclusive of the request clock's `until`.
+Workflow creation time (or first persistence time if absent) assigns attempts
+to days. Attempts, including reruns, count separately.
+
+- `totalRuns` counts persisted completed workflow attempts of every conclusion,
+  regardless of whether their analysis is processing, failed or completed.
+- `failedRuns` counts conclusions `failure`, `timed_out`, and `startup_failure`,
+  independently of job-log or analysis availability. It is not a processing
+  error count.
+- `failureRate` is a percentage: `100 * failedRuns / totalRuns` for each day.
+  It is null for days with no runs, not a misleading zero; success-only days
+  have a rate of zero.
+- `recurringFailures` counts failed attempts with an available fingerprint
+  matching an earlier attempt within this repository and window. The first
+  occurrence is not counted; each repeating attempt counts at most once even
+  with several matching jobs/fingerprints.
+- `successfulAnalyses` counts completed failed attempts with at least one failed
+  job and a non-null analysis for every failed job. Metadata-only non-failed
+  workflows and partial/unavailable analyses do not inflate this metric.
+- `failuresByCategory` counts attempts once per distinct available category,
+  unlike the older `/statistics` job counts. Multiple categories can apply to
+  one attempt. Unavailable analyses are not invented `UNKNOWN` categories;
+  consequently category counts need not sum to `failedRuns`.
+
+The backend uses a time-bounded chronological GSI query, processing 100 records
+per page without a table scan or loading history into browser memory. Cost
+still scales with attempts **within the selected window**. Like other GSI reads,
+it is eventually consistent, not a snapshot. High-volume deployments should
+introduce maintained rollups before high-frequency polling.
+
+The Analytics page requests this endpoint only for the selected repository and
+range, never `/runs` or raw logs. Repository discovery is paginated separately;
+users can load more repository choices. Results are cached for five minutes,
+with explicit refresh and retry. Errors do not become fake zero counts.
+
+**Coverage:** completed webhooks now queue all valid conclusions. Non-failed
+workflows are persisted using the same idempotent attempt claims with an empty
+failed-job result; they do not retrieve jobs or logs. Failed workflows retain
+the existing analysis/retry path. Collection is prospective: older successful
+attempts discarded before this change are **not automatically recovered**.
+Re-deliver completed webhooks or use the existing explicit run-analysis endpoint
+to ingest missing successful attempts before interpreting older failure rates.
+The read-index backfill alone cannot recover absent run metadata.
 
 ## Deployment and existing data
 

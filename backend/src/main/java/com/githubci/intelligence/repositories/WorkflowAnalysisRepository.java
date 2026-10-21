@@ -203,6 +203,16 @@ public class WorkflowAnalysisRepository {
                 .items().stream().findFirst().map(this::decode);
     }
 
+    public ReadPage<StoredWorkflowAnalysis> runsBetween(
+            String repository, Instant from, Instant until, Map<String, AttributeValue> start) {
+        var page = table.index(RUNS_INDEX).query(request -> request
+                .queryConditional(QueryConditional.sortBetween(
+                        Key.builder().partitionValue(partition(repository)).sortValue(TIMESTAMP.format(from)).build(),
+                        Key.builder().partitionValue(partition(repository)).sortValue(TIMESTAMP.format(until)).build()))
+                .scanIndexForward(true).limit(100).exclusiveStartKey(start)).iterator().next();
+        return new ReadPage<>(page.items().stream().map(this::decode).toList(), page.lastEvaluatedKey());
+    }
+
     // Run only as an explicit maintenance operation with writers stopped.
     public long backfillReadMetadata() {
         long count = 0;

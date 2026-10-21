@@ -3,7 +3,7 @@
 A full-stack developer tool with a GitHub Actions REST integration and developer
 dashboard and a deterministic CI failure analyzer. Workflow analyses are persisted
 in Amazon DynamoDB; sanitized, compressed job logs are stored in Amazon S3.
-Authenticated failed-workflow webhooks are queued in Amazon SQS for asynchronous processing.
+Authenticated completed-workflow webhooks are queued in Amazon SQS for asynchronous processing.
 End-user authentication is not implemented.
 
 The [persisted analysis REST API](docs/analysis-api.md) provides repository
@@ -265,9 +265,10 @@ parsing JSON or checking event type or duplicate delivery IDs. Never reformat
 or reserialize a payload before verifying it.
 
 - Only `X-GitHub-Event: workflow_run`, `action: completed`, and
-  `workflow_run.status: completed` are considered. Failed conclusions
-  `failure`, `timed_out`, and `startup_failure` are published; other valid
-  conclusions (including success/cancelled) are ignored.
+  `workflow_run.status: completed` are considered. All valid completed conclusions
+  (including success/cancelled) are published and retained as run metadata so
+  analytics has a valid failure-rate denominator. Only `failure`, `timed_out`,
+  and `startup_failure` trigger job/log retrieval and failure analysis.
 - Enqueued, duplicate, and unrelated events return **204** with no body.
   A relevant event receives 204 only after SQS accepts the message.
   Unrelated event types are authenticated but do not need to be parsed.
@@ -668,7 +669,15 @@ zero counts. Requests accept cancellation signals. The statistics endpoint
 reads all persisted attempts; large histories should use maintained backend
 aggregates before reducing the cache duration. See [API semantics](docs/analysis-api.md).
 
-Workflow Failures and Analytics still use explicitly labeled sample data.
+Analytics uses Material UI summary cards and responsive Recharts line/bar charts,
+with repository and 7/30/90-day filters. It requests server-side windowed
+aggregates, not raw workflow records. Daily failure rates include successful
+workflow metadata in the denominator. Keyboard-accessible tooltips, chart data
+tables, empty states and explicit retries support investigation without invented
+metrics. See [historical analytics](docs/analysis-api.md#historical-analytics)
+for count definitions and historical data coverage limitations.
+
+Workflow Failures still uses explicitly labeled sample data.
 
 The backend health indicator calls `GET /api/health` using a shared Axios client
 and TanStack Query. It shows checking, connected (`status: "UP"`), non-UP, invalid

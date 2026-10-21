@@ -249,18 +249,19 @@ class GitHubWebhookControllerTest {
     }
 
     @Test
-    void ignoresSuccessfulRunsAndAcceptsFailedRunsWithOptionalInstallation() throws Exception {
+    void queuesSuccessfulAndFailedRunsWithOptionalInstallation() throws Exception {
         for (String payload : new String[] {
                 PAYLOAD.replace("\"installation\": {\"id\": 456},", ""),
                 PAYLOAD.replace("\"installation\": {\"id\": 456}", "\"installation\": null")}) {
             mvc.perform(signed(payload.replace("\"failure\"", "\"success\""),
                             "workflow_run", UUID.randomUUID().toString()))
                     .andExpect(status().isNoContent());
-            assertTrue(appender.list.isEmpty());
+            assertEquals("success", appender.list.getLast().getArgumentArray()[5]);
         }
         mvc.perform(signed(PAYLOAD.replace("\"installation\": {\"id\": 456},", ""),
                 "workflow_run", delivery)).andExpect(status().isNoContent());
         assertNull(appender.list.getLast().getArgumentArray()[2]);
+        verify(publisher, times(3)).publish(any());
     }
 
     @Test

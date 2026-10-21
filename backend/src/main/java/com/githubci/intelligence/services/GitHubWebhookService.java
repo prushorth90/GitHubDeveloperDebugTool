@@ -5,7 +5,6 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.Locale;
-import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -26,9 +25,6 @@ import tools.jackson.databind.ObjectMapper;
 public class GitHubWebhookService {
 
     private static final Logger log = LoggerFactory.getLogger(GitHubWebhookService.class);
-    private static final Set<String> CONCLUSIONS = Set.of(
-            "success", "failure", "neutral", "cancelled", "skipped", "timed_out",
-            "action_required", "stale", "startup_failure");
 
     private final String secret;
     private final ObjectMapper mapper;
@@ -74,7 +70,7 @@ public class GitHubWebhookService {
         String repositoryName = text(repository.path("full_name"));
         String conclusion = text(run.path("conclusion"));
         if (!repositoryName.matches("[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
-                || !CONCLUSIONS.contains(conclusion)
+                || !WorkflowEvent.COMPLETED_CONCLUSIONS.contains(conclusion)
                 || deliveryId == null
                 || !deliveryId.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
             throw malformed();
@@ -89,13 +85,11 @@ public class GitHubWebhookService {
         WorkflowEvent workflowEvent = new WorkflowEvent(
                 positiveId(repository.path("id")), repositoryName, installationId,
                 positiveId(run.path("id")), (int) attempt, conclusion, deliveryId.toLowerCase(Locale.ROOT));
-        if (WorkflowEvent.FAILED_CONCLUSIONS.contains(conclusion)) {
-            publisher.publish(workflowEvent);
-            log.info("GitHub workflow queued: repositoryId={}, repositoryName={}, installationId={}, "
+        publisher.publish(workflowEvent);
+        log.info("GitHub workflow queued: repositoryId={}, repositoryName={}, installationId={}, "
                             + "workflowRunId={}, runAttempt={}, conclusion={}, deliveryId={}",
                     workflowEvent.repositoryId(), workflowEvent.repositoryName(), workflowEvent.installationId(),
                     workflowEvent.workflowRunId(), workflowEvent.runAttempt(), conclusion, workflowEvent.deliveryId());
-        }
     }
 
     private void verifySignature(byte[] body, String signature) {

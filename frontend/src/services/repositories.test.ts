@@ -1,7 +1,7 @@
 import { AxiosError, AxiosHeaders } from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
-import { getRepositories, getRepositoryStatistics, repositoryErrorMessage } from './repositories';
+import { getRepositories, getRepositoryStatistics, getWorkflowAnalytics, repositoryErrorMessage } from './repositories';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -33,6 +33,29 @@ describe('repository API client', () => {
     vi.spyOn(api, 'get').mockRejectedValue(error);
     await expect(getRepositories(null)).rejects.toBe(error);
     await expect(getRepositoryStatistics(1)).rejects.toBe(error);
+    await expect(getWorkflowAnalytics(1, 7)).rejects.toBe(error);
+  });
+
+  it('requests bounded aggregates with the selected window and cancellation signal', async () => {
+    const summary = { totalRuns: 12, failedRuns: 3, recurringFailures: 1, successfulAnalyses: 2,
+      dailyRates: [{ date: '2026-10-20', totalRuns: 12, failedRuns: 3, failureRate: 25 }],
+      failuresByCategory: { JAVA_COMPILATION: 3 } };
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ data: { data: summary } });
+    const signal = new AbortController().signal;
+    expect(await getWorkflowAnalytics(42, 90, signal)).toBe(summary);
+    expect(get).toHaveBeenCalledExactlyOnceWith('/api/repositories/42/analytics', { params: { days: 90 }, signal });
+  });
+
+  it('rejects malformed aggregate payloads instead of crashing the charts or inventing zeros', async () => {
+    const get = vi.spyOn(api, 'get');
+    for (const payload of [null, {}, { items: [] }, {
+      totalRuns: 2, failedRuns: 1, recurringFailures: 0, successfulAnalyses: 1,
+      dailyRates: [{ date: '2026-10-20', totalRuns: 2, failedRuns: 1, failureRate: 120 }],
+      failuresByCategory: {},
+    }]) {
+      get.mockResolvedValue({ data: { data: payload } });
+      await expect(getWorkflowAnalytics(1, 7)).rejects.toThrow('invalid analytics data');
+    }
   });
 
   it('uses standard backend error messages, HTTP status fallbacks and network guidance', () => {

@@ -93,6 +93,9 @@ public class WorkflowRunAnalysisService {
 
     private WorkflowRunAnalysis analyzeAttempt(String owner, String repo, GitHubWorkflowRun run,
             WorkflowAnalysisRepository.Claim claim) {
+        if (!WorkflowEvent.FAILED_CONCLUSIONS.contains(run.conclusion())) {
+            return new WorkflowRunAnalysis(owner + "/" + repo, run.id(), List.of());
+        }
         long runId = run.id();
         int attempt = run.runAttempt();
         List<FailedJobAnalysis> failures = new ArrayList<>();

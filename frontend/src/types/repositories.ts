@@ -58,3 +58,19 @@ export interface RepositoryStatistics {
   latestRun: WorkflowRun | null;
   lastAnalyzedAt: string | null;
 }
+
+export interface WorkflowAnalytics {
+  from: string;
+  until: string;
+  totalRuns: number;
+  failedRuns: number;
+  recurringFailures: number;
+  successfulAnalyses: number;
+  dailyRates: {
+    date: string;
+    totalRuns: number;
+    failedRuns: number;
+    failureRate: number | null;
+  }[];
+  failuresByCategory: Record<FailureCategory, number>;
+}

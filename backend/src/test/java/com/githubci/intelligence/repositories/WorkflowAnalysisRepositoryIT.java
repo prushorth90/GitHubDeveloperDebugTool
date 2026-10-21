@@ -23,6 +23,8 @@ import com.githubci.intelligence.exceptions.AnalysisConflictException;
 import com.githubci.intelligence.exceptions.GitHubException;
 import com.githubci.intelligence.exceptions.GlobalExceptionHandler;
 import com.githubci.intelligence.controllers.RepositoryController;
+import com.githubci.intelligence.controllers.AnalyticsController;
+import com.githubci.intelligence.services.AnalyticsService;
 import com.githubci.intelligence.services.FailureService;
 import com.githubci.intelligence.models.AnalysisStatus;
 import com.githubci.intelligence.services.FailureAnalyzerService;
@@ -130,13 +132,42 @@ class WorkflowAnalysisRepositoryIT {
         client.waiter().waitUntilTableExists(request -> request.tableName(tableName));
         repository = repositoryAt(NOW);
         mvc = MockMvcBuilders.standaloneSetup(new RepositoryController(
-                        new FailureService(repository, JsonMapper.builder().build())))
+                        new FailureService(repository, JsonMapper.builder().build())),
+                        new AnalyticsController(new AnalyticsService(repository, Clock.fixed(NOW, ZoneOffset.UTC))))
                 .setControllerAdvice(new GlobalExceptionHandler(Clock.fixed(NOW, ZoneOffset.UTC))).build();
     }
 
     @AfterEach
     void deleteTable() {
         client.deleteTable(request -> request.tableName(tableName));
+    }
+
+    @Test
+    void queriesOnlyTheRequestedAnalyticsTimeRangeInChronologicalOrder() {
+        repository.claim(REPOSITORY, run(1, 1, NOW.minusSeconds(100)));
+        repository.claim(REPOSITORY, run(2, 1, NOW.minusSeconds(50)));
+        repository.claim(REPOSITORY, run(3, 1, NOW.minusSeconds(25)));
+        repository.claim(REPOSITORY, run(4, 1, NOW));
+        var page = repository.runsBetween(REPOSITORY, NOW.minusSeconds(50), NOW, Map.of());
+        assertEquals(List.of(2L, 3L), page.items().stream().map(record -> record.workflowRun().id()).toList());
+        assertTrue(page.nextKey().isEmpty());
+    }
+
+    @Test
+    void returnsPersistedSuccessesInTheAnalyticsDenominatorWithoutRawHistory() throws Exception {
+        var success = new GitHubWorkflowRun(1, "CI", 1, 1, 1, "push", "completed", "success",
+                "main", "sha", null, NOW.minusSeconds(60), NOW, run(42, 1, NOW).repository());
+        repository.complete(repository.claim(REPOSITORY, success), empty(1));
+        repository.complete(repository.claim(REPOSITORY, run(42, 1, NOW.minusSeconds(30))), failure(42));
+        mvc.perform(get("/api/repositories/" + success.repository().id() + "/analytics").param("days", "7"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.totalRuns").value(2))
+                .andExpect(jsonPath("$.data.failedRuns").value(1))
+                .andExpect(jsonPath("$.data.successfulAnalyses").value(1))
+                .andExpect(jsonPath("$.data.dailyRates[6].failureRate").value(50.0))
+                .andExpect(jsonPath("$.data.dailyRates.length()").value(7))
+                .andExpect(jsonPath("$.data.items").doesNotExist())
+                .andExpect(jsonPath("$.data.workflowRun").doesNotExist());
     }
 
     @Test
