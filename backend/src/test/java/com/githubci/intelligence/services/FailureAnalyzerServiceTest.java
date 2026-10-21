@@ -28,6 +28,15 @@ class FailureAnalyzerServiceTest {
             "Run echo 'org.postgresql.util.PSQLException: Connection refused'\n"
                     + "org.postgresql.util.PSQLException: Connection refused\nError: Process completed with exit code 1.",
             "printf 'psql: could not connect'\npsql: could not connect",
+            "printf '%s\\n' 'org.postgresql.util.PSQLException: Connection refused'\n"
+                    + "org.postgresql.util.PSQLException: Connection refused\nexit 1",
+            "echo 'org.postgresql.util.PSQLException: Connection refused'; exit 1\n"
+                    + "org.postgresql.util.PSQLException: Connection refused",
+            "echo 'psql: could not connect to $DB & retry'; exit 1\n"
+                    + "psql: could not connect to $DB & retry",
+            "##[group]Run echo 'psql: could not connect'\n"
+                    + "echo 'psql: could not connect'\nexit 1\nshell: /usr/bin/bash -e {0}\n"
+                    + "##[endgroup]\npsql: could not connect\nError: Process completed with exit code 1.",
             "echo org.postgresql.util.PSQLException: Connection refused\n"
                     + "org.postgresql.util.PSQLException: Connection refused",
             "Error: Could not connect to PostgreSQL",
@@ -40,6 +49,18 @@ class FailureAnalyzerServiceTest {
         assertTrue(result.diagnosticFindings().stream()
                 .filter(finding -> finding.kind() == com.githubci.intelligence.dto.DiagnosticFinding.Kind.HYPOTHESIS)
                 .allMatch(finding -> finding.confidence() == ConfidenceLevel.LOW));
+    }
+
+    @Test
+    void doesNotSuppressGenuineExceptionInALaterStepBecauseAnEarlierStepEchoedTheSameText() {
+        String diagnostic = "org.postgresql.util.PSQLException: Connection to db:5432 refused.";
+        var result = analyzer.analyze("##[group]Run echo '" + diagnostic + "'\n"
+                + "echo '" + diagnostic + "'\n##[endgroup]\n" + diagnostic + "\n"
+                + "##[group]Run mvn verify\nmvn verify\n##[endgroup]\n" + diagnostic + "\n"
+                + "Caused by: java.net.ConnectException: Connection refused\n");
+        assertEquals(FailureCategory.POSTGRESQL_CONNECTION, result.category());
+        assertEquals(8, result.evidence().getFirst().lineNumber());
+        assertEquals(diagnostic, result.errorMessage());
     }
 
     static Stream<Arguments> failures() {

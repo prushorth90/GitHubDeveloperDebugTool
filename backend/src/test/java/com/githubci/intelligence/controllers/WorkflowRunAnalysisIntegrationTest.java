@@ -315,6 +315,23 @@ class WorkflowRunAnalysisIntegrationTest {
         org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).fail(any());
     }
 
+    @Test
+    void returnsCompletedStoredAnalysisWithoutDownloadingLogsOrRewritingIt() throws Exception {
+        expectRun();
+        var persisted = new WorkflowRunAnalysis("octo/demo", 42, java.util.List.of());
+        when(repository.claim(anyString(), any(GitHubWorkflowRun.class))).thenAnswer(invocation ->
+                new WorkflowAnalysisRepository.Claim(new StoredWorkflowAnalysis(
+                        "octo/demo", invocation.getArgument(1), AnalysisStatus.COMPLETED,
+                        persisted, Instant.now(), Instant.now(), null), null));
+        mvc.perform(post(PATH)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.runId").value(42))
+                .andExpect(jsonPath("$.failedJobs").isEmpty());
+        verify(repository, never()).complete(any(), any());
+        verify(repository, never()).renew(any());
+        verify(repository, never()).fail(any());
+        org.mockito.Mockito.verifyNoInteractions(logStorage);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"null", "{\"id\":0,\"private\":true}", "{\"id\":-1,\"private\":true}"})
     void rejectsInvalidRepositoryIdsBeforeClaimingOrUploading(String repositoryJson) throws Exception {

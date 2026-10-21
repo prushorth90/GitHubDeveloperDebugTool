@@ -83,6 +83,16 @@ The existing top-level confidence rates category evidence, not root-cause certai
 Bedrock explanations retain Java categories/fingerprints, so existing filters,
 similarity and analytics semantics remain stable.
 
+The Workflow Failures UI shows persisted source/model metadata and overall
+classification confidence, with separate Material UI cards for observations,
+unverified hypotheses, recommendations, and classification evidence. Finding
+evidence is visible with one-based log line numbers. Structured findings take
+precedence over legacy summary text; records without findings retain the legacy
+message, suspected cause, investigation, and evidence. An echoed error and an
+explicit `exit 1` are log facts, not proof of an actual PostgreSQL connection
+failure. Recommendations remain investigation guidance, not confirmed fixes.
+Opening or refreshing details only reads stored data.
+
 These additive fields are stored in the existing DynamoDB analysis JSON.
 Older records deserialize as `LEGACY_JAVA` with no newly invented findings.
 Reading details never generates an explanation or invokes a model. Completed

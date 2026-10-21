@@ -72,7 +72,7 @@ export interface WorkflowFailure {
       suspectedCause: string;
       suggestedInvestigation: string;
       confidence: 'LOW' | 'MEDIUM' | 'HIGH';
-      analysisSource?: 'JAVA' | 'LEGACY_JAVA' | 'BEDROCK';
+      analysisSource?: 'JAVA' | 'LEGACY_JAVA' | 'BEDROCK' | null;
       modelIdentifier?: string | null;
       fallbackReason?: string | null;
       diagnosticFindings?: {
@@ -80,7 +80,7 @@ export interface WorkflowFailure {
         description: string;
         confidence: 'LOW' | 'MEDIUM' | 'HIGH';
         evidence: { lineNumber: number; text: string }[];
-      }[];
+      }[] | null;
       evidence: { lineNumber: number; text: string }[];
     } | null;
   }[];

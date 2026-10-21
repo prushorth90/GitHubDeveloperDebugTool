@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import FailuresPage from './FailuresPage';
 import { getRepositories, getRepositoryFailures, getWorkflowFailure } from '../services/repositories';
 import type { WorkflowFailure, WorkflowRun } from '../types/repositories';
+import storedRun from './fixtures/run-39664424359.json';
 
 vi.mock('../services/repositories', async (importOriginal) => ({
   ...await importOriginal<typeof import('../services/repositories')>(),
@@ -45,6 +46,54 @@ beforeEach(() => {
 afterEach(() => { cleanup(); client.clear(); });
 
 describe('persisted workflow failures', () => {
+  it('displays the real stored Nova Lite findings without presenting the connection hypothesis as fact', async () => {
+    const storedFailure = storedRun.data as WorkflowFailure;
+    vi.mocked(getRepositoryFailures).mockResolvedValue({ items: [storedFailure.run], nextToken: null });
+    vi.mocked(getWorkflowFailure).mockResolvedValue(storedFailure);
+    dashboard();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run 39664424359 / attempt 1' }));
+    await screen.findByText('Model: us.amazon.nova-lite-v1:0');
+    expect(screen.getByText('Source: BEDROCK')).toBeDefined();
+    expect(screen.getByText('Overall classification confidence: LOW')).toBeDefined();
+    const observations = within(screen.getByRole('region', { name: 'Observations' }));
+    expect(observations.getByText('Observation / HIGH')).toBeDefined();
+    const evidence = observations.getByText(/Line 33:/).textContent!;
+    expect(evidence).toContain('Line 33: 2026-10-21T19:45:42.1037855Z echo "Error: Could not connect to PostgreSQL"');
+    expect(evidence).toContain('Line 34: 2026-10-21T19:45:42.1039223Z exit 1');
+    expect(evidence).toContain('Line 37: 2026-10-21T19:45:42.2334183Z Error: Could not connect to PostgreSQL');
+    expect(evidence.indexOf('Line 33:')).toBeLessThan(evidence.indexOf('Line 34:'));
+    expect(observations.getByText(/do not establish that a real connection was attempted or failed/)).toBeDefined();
+    const hypothesis = storedFailure.failedJobs[0].analysis!.diagnosticFindings![1].description;
+    expect(observations.queryByText(hypothesis)).toBeNull();
+    const hypotheses = within(screen.getByRole('region', { name: 'Unverified hypotheses' }));
+    expect(hypotheses.getByText(hypothesis)).toBeDefined();
+    expect(hypotheses.getByText('Hypothesis (unverified) / LOW')).toBeDefined();
+    expect(hypotheses.getByText(/not established facts/)).toBeDefined();
+    const recommendations = within(screen.getByRole('region', { name: 'Recommendations' }));
+    expect(recommendations.getByText(storedFailure.failedJobs[0].analysis!.suggestedInvestigation)).toBeDefined();
+    expect(recommendations.getByText(/not a verified diagnosis/)).toBeDefined();
+    expect(screen.queryByText(storedFailure.failedJobs[0].analysis!.suspectedCause)).toBeNull();
+    expect(getWorkflowFailure).toHaveBeenCalledExactlyOnceWith(1, 39664424359, 1, expect.any(AbortSignal));
+  });
+
+  it.each([undefined, null, []])('preserves legacy summaries without structured findings (%s)', async (diagnosticFindings) => {
+    vi.mocked(getWorkflowFailure).mockResolvedValue({
+      ...failure, failedJobs: [{ ...failure.failedJobs[0], analysis: {
+        ...failure.failedJobs[0].analysis!, diagnosticFindings,
+      } }],
+    });
+    dashboard();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run 99 / attempt 2' }));
+    await screen.findByText('Source: LEGACY_JAVA');
+    expect(screen.getByText(/Legacy analysis: confidence/)).toBeDefined();
+    expect(within(screen.getByRole('region', { name: 'Observations' })).getByText('Compilation failed')).toBeDefined();
+    expect(within(screen.getByRole('region', { name: 'Unverified hypotheses' }))
+      .getByText('Root-cause hypothesis (unverified): Invalid Java source')).toBeDefined();
+    expect(within(screen.getByRole('region', { name: 'Recommendations' })).getByText('Check compiler output')).toBeDefined();
+    expect(screen.queryByText(/^Model:/)).toBeNull();
+    expect(screen.getByText('Line 3: error: missing symbol')).toBeDefined();
+  });
+
   it('distinguishes observations, hypotheses, provenance, and supporting log references', async () => {
     vi.mocked(getWorkflowFailure).mockResolvedValue({
       ...failure, failedJobs: [{ ...failure.failedJobs[0], analysis: {
@@ -60,9 +109,8 @@ describe('persisted workflow failures', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Run 99 / attempt 2' }));
     await screen.findByText('Source: BEDROCK');
     expect(screen.getByText('Model: test-model')).toBeDefined();
-    expect(screen.getByText('Classification confidence: LOW')).toBeDefined();
+    expect(screen.getByText('Overall classification confidence: LOW')).toBeDefined();
     expect(screen.getByText('Hypothesis (unverified) / LOW')).toBeDefined();
-    await userEvent.click(screen.getByRole('button', { name: /Observation \/ HIGH/ }));
     expect(screen.getByText(/Observation confidence concerns log text/)).toBeDefined();
     expect(screen.getByText('Line 5: echo "Error: Could not connect to PostgreSQL"')).toBeDefined();
   });
@@ -85,7 +133,6 @@ describe('persisted workflow failures', () => {
     await screen.findByText(text);
     expect(screen.getByText(`Unverified: ${text}`)).toBeDefined();
     expect(screen.getByText('Hypothesis (unverified) / LOW')).toBeDefined();
-    await userEvent.click(screen.getByRole('button', { name: /Observation \/ HIGH/ }));
     expect(screen.getAllByText(`Line 3: ${text}`)).toHaveLength(2);
     expect(view.container.querySelector('img')).toBeNull();
   });
@@ -111,7 +158,7 @@ describe('persisted workflow failures', () => {
     expect(screen.getByRole('link', { name: 'GitHub logs' }).getAttribute('href')).toBe(run.htmlUrl);
     await userEvent.click(button);
     await screen.findByText('Compilation failed');
-    expect(screen.getByText('3: error: missing symbol')).toBeDefined();
+    expect(screen.getByText('Line 3: error: missing symbol')).toBeDefined();
     expect(getWorkflowFailure).toHaveBeenCalledExactlyOnceWith(1, 99, 2, expect.any(AbortSignal));
   });
 

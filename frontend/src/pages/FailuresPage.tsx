@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import {
-  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip, FormControl, InputLabel, Link, MenuItem, Select, Stack,
+  Alert, Box, Button, FormControl, InputLabel, Link, MenuItem, Select, Stack,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography,
 } from '@mui/material';
 import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { PageHeader } from '../components/PageHeader';
 import { SectionCard } from '../components/DashboardCards';
+import { FailureAnalysisDetails } from '../components/FailureAnalysisDetails';
 import { useRepositories } from '../hooks/useRepositories';
 import { getRepositoryFailures, getWorkflowFailure, repositoryErrorMessage } from '../services/repositories';
 
@@ -119,47 +120,8 @@ export default function FailuresPage() {
           </Alert>}
           {detail.data?.failedJobs.map((job) => <Box key={job.jobId} sx={{ mb: 2 }}>
             <Typography component="h3" variant="h6">{job.name}</Typography>
-            {job.analysis ? <>
-              <Stack direction="row" spacing={1} sx={{ my: 1, flexWrap: 'wrap' }} useFlexGap>
-                <Chip label={job.analysis.category} />
-                <Chip label={`Classification confidence: ${job.analysis.confidence}`} variant="outlined" />
-                <Chip label={`Source: ${job.analysis.analysisSource ?? 'LEGACY_JAVA'}`} variant="outlined" />
-              </Stack>
-              {job.analysis.modelIdentifier && <Typography variant="body2">Model: {job.analysis.modelIdentifier}</Typography>}
-              {job.analysis.fallbackReason && <Alert severity="warning" sx={{ my: 1 }}>
-                Bedrock explanation unavailable ({job.analysis.fallbackReason}). Showing Java analysis.
-              </Alert>}
-              {(!job.analysis.analysisSource || job.analysis.analysisSource === 'LEGACY_JAVA') && <Alert severity="info">
-                Legacy analysis: confidence and evidence have not been reassessed with the current analyzer.
-              </Alert>}
-              <Typography variant="subtitle2">Observed log message (not proof of root cause)</Typography>
-              <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{job.analysis.errorMessage}</Typography>
-              <Typography sx={{ mt: 1 }}>Root-cause hypothesis (unverified): {job.analysis.suspectedCause}</Typography>
-              <Typography>Suggested investigation: {job.analysis.suggestedInvestigation}</Typography>
-              {job.analysis.diagnosticFindings?.map((finding, index) => <Accordion key={index} disableGutters sx={{ mt: 1 }}>
-                <AccordionSummary>
-                  <Stack spacing={1}>
-                    <Chip size="small" color={finding.kind === 'OBSERVATION' ? 'info' : 'warning'}
-                      label={`${finding.kind === 'OBSERVATION' ? 'Observation' : 'Hypothesis (unverified)'} / ${finding.confidence}`} />
-                    <Typography sx={{ overflowWrap: 'anywhere' }}>{finding.description}</Typography>
-                  </Stack>
-                </AccordionSummary>
-                <AccordionDetails>
-                  {finding.kind === 'OBSERVATION' && <Typography variant="body2">
-                    Observation confidence concerns log text, not whether its claims are true or establish a root cause.
-                  </Typography>}
-                  <Typography variant="subtitle2">Supporting sanitized job log references</Typography>
-                  <Box component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                    {finding.evidence.map((line) => `Line ${line.lineNumber}: ${line.text}`).join('\n')
-                      || 'No direct log evidence; investigation required.'}
-                  </Box>
-                </AccordionDetails>
-              </Accordion>)}
-              <Typography variant="subtitle2" sx={{ mt: 2 }}>Classification evidence (sanitized job log lines)</Typography>
-              <Box component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                {job.analysis.evidence.map((line) => `${line.lineNumber}: ${line.text}`).join('\n')}
-              </Box>
-            </> : <Alert severity="warning">{job.logMessage ?? `Job logs ${job.logStatus.toLowerCase()}; no analysis available.`}</Alert>}
+            {job.analysis ? <FailureAnalysisDetails analysis={job.analysis} />
+              : <Alert severity="warning">{job.logMessage ?? `Job logs ${job.logStatus.toLowerCase()}; no analysis available.`}</Alert>}
           </Box>)}
         </Box>
       </SectionCard>

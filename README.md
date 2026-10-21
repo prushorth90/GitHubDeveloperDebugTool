@@ -685,6 +685,16 @@ patches and model output, but cannot guarantee removal of arbitrary application
 secrets or sensitive business data; review your data policy before opting in.
 Logs/patches are treated as untrusted data, never prompt instructions.
 
+Excerpt selection prioritizes failure output and its runner `Run` command block,
+then failed-step timestamps and baseline evidence before filling remaining space
+with job setup/tail context. The same 100-line/500-character bounds and original
+line IDs still apply. Internal `logLineKinds` and `stepHeaderLines` maps distinguish
+displayed shell source, literal echo/printf output, runner process-exit status,
+candidate application diagnostics, and step metadata. Literal printed-message
+matching is scoped to its command step, so a later real exception is not suppressed
+just because an earlier step echoed identical text. These are conservative hints,
+not a shell interpreter or a guarantee that arbitrary output is genuine.
+
 Responses must be one JSON object, optionally enclosed in a single whole-response
 Markdown fence (bare or `json`, with opening/closing fences on their own lines).
 Surrounding whitespace is allowed, but prose outside the JSON/fence, duplicate
@@ -723,6 +733,20 @@ unchanged), not a promotion of the diagnosis. Extra fields, observation
 descriptions/model quotations, unsupported kinds and model-supplied confidence
 are rejected, not silently corrected.
 
+Java also rejects database attribution in `suspectedCause` or a hypothesis unless
+the cited IDs include non-command, non-printed PostgreSQL client connection
+diagnostics accepted by the Java classifier. Each hypothesis needs its own
+supporting citations; a genuine exception elsewhere in the log is insufficient.
+This guard deliberately fails closed on database terminology, even a negated
+attribution without supporting diagnostics. For echo/exit-only or ambiguous
+failures, the prompt requests a possible scripted-failure or insufficient-evidence
+explanation rather than database attribution. Incompatible responses use the
+existing `BEDROCK_INVALID_RESPONSE` Java fallback, without retries or repairs.
+An echoed exception name and `exit 1` alone never establish a database outage.
+Even real client exceptions support only an unverified connection hypothesis,
+not a confirmed server outage. The REST, React, MCP and persisted DTO contracts
+are unchanged.
+
 [AWS lists Nova Lite v1 as not supporting native structured outputs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-lite.html).
 Converse's native `outputConfig.textFormat` schema-constrained mode is therefore
 not enabled for `us.amazon.nova-lite-v1:0`. Nova's
@@ -740,7 +764,7 @@ labels suspected causes as unverified and exposes the supporting logs.
 All fields persist in the existing DynamoDB serialized analysis attribute and
 are returned by the existing REST detail route; no table/index migration is
 needed. Existing completed analyses are intentionally immutable and returned from
-cache. This change **does not rewrite run 39549084142's stored diagnosis**. Old
+cache. This change **does not rewrite run 39549084142's or run 39664424359's stored diagnosis**. Old
 records are labeled `LEGACY_JAVA` in the UI; rerun the workflow to create a new
 attempt for live testing. Redelivering the same completed attempt will not
 regenerate analysis or incur another Bedrock call.

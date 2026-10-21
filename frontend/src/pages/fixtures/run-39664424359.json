@@ -1,0 +1,66 @@
+{
+  "data": {
+    "run": {
+      "runId": 39664424359,
+      "attempt": 1,
+      "workflowName": "CI Debugger Test",
+      "branch": "main",
+      "conclusion": "failure",
+      "htmlUrl": "https://github.com/prushorth90/GitHubDeveloperDebugTool/actions/runs/39664424359",
+      "createdAt": "2026-10-21T19:45:36Z",
+      "analyzedAt": "2026-10-21T19:45:52.247Z",
+      "analysisStatus": "COMPLETED",
+      "analysisComplete": true,
+      "categories": ["UNKNOWN"]
+    },
+    "failedJobs": [{
+      "jobId": 119445558834,
+      "name": "intentional-failure",
+      "logStatus": "AVAILABLE",
+      "logMessage": null,
+      "analysis": {
+        "category": "UNKNOWN",
+        "errorMessage": "Complete job name: intentional-failure",
+        "suspectedCause": "The job failed to connect to PostgreSQL, resulting in an exit code of 1.",
+        "suggestedInvestigation": "Investigate the PostgreSQL service availability, network connectivity, and credentials used for the connection.",
+        "confidence": "LOW",
+        "evidence": [{
+          "lineNumber": 31,
+          "text": "Complete job name: intentional-failure"
+        }],
+        "logContext": [
+          {"lineNumber": 29, "text": "Prepare workflow directory"},
+          {"lineNumber": 30, "text": "Prepare all required actions"},
+          {"lineNumber": 31, "text": "Complete job name: intentional-failure"}
+        ],
+        "normalizedSignature": "Complete job name: intentional-failure",
+        "fingerprint": "abc0ec3bdb7865541261b6ad25dd0dd6176215382e1f8d4df6c1de5f216db3f2",
+        "analysisSource": "BEDROCK",
+        "modelIdentifier": "us.amazon.nova-lite-v1:0",
+        "diagnosticFindings": [
+          {
+            "kind": "OBSERVATION",
+            "description": "2026-10-21T19:45:42.1037855Z echo \"Error: Could not connect to PostgreSQL\"",
+            "confidence": "HIGH",
+            "evidence": [
+              {"lineNumber": 33, "text": "2026-10-21T19:45:42.1037855Z echo \"Error: Could not connect to PostgreSQL\""},
+              {"lineNumber": 34, "text": "2026-10-21T19:45:42.1039223Z exit 1"},
+              {"lineNumber": 37, "text": "2026-10-21T19:45:42.2334183Z Error: Could not connect to PostgreSQL"}
+            ]
+          },
+          {
+            "kind": "HYPOTHESIS",
+            "description": "The job failed to connect to PostgreSQL, which may be due to the PostgreSQL service being unavailable, network issues, or incorrect credentials.",
+            "confidence": "LOW",
+            "evidence": [
+              {"lineNumber": 33, "text": "2026-10-21T19:45:42.1037855Z echo \"Error: Could not connect to PostgreSQL\""},
+              {"lineNumber": 34, "text": "2026-10-21T19:45:42.1039223Z exit 1"},
+              {"lineNumber": 37, "text": "2026-10-21T19:45:42.2334183Z Error: Could not connect to PostgreSQL"}
+            ]
+          }
+        ],
+        "fallbackReason": null
+      }
+    }]
+  }
+}

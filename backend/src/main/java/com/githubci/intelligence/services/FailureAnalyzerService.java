@@ -40,11 +40,6 @@ public class FailureAnalyzerService {
         this.fingerprintService = fingerprintService;
     }
 
-    private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-?]*[ -/]*[@-~]");
-    private static final Pattern ECHO = pattern(
-            "\\b(?:echo|printf)\\s+(?:-[a-z]+\\s+)?(?:\"([^\"\\r\\n]*)\"|'([^'\\r\\n]*)'|([^\\r\\n;&|]+))");
-    private static final Pattern TIMESTAMP = Pattern.compile(
-            "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z\\s*");
     private static final Pattern GENERIC_ERROR = pattern(
             "\\b(error|exception|failed|failure|fatal|ECONNREFUSED)\\b|##\\[error\\]");
     private static final Pattern CONNECTION_FAILURE = pattern(
@@ -144,28 +139,21 @@ public class FailureAnalyzerService {
         if (rawLogs == null) {
             throw new IllegalArgumentException("Raw job logs must not be null");
         }
-        List<String> lines = rawLogs.lines()
-                .map(line -> TIMESTAMP.matcher(ANSI.matcher(line).replaceAll("")).replaceFirst("").strip())
-                .toList();
+        JobLogContext logContext = new JobLogContext(rawLogs);
+        List<String> lines = logContext.lines();
         Map<FailureCategory, Match> matches = new EnumMap<>(FailureCategory.class);
-        List<String> printedMessages = lines.stream().flatMap(line -> ECHO.matcher(line).results())
-                .map(result -> {
-                    String message = result.group(1) != null ? result.group(1)
-                            : result.group(2) != null ? result.group(2) : result.group(3);
-                    return message.replace("\\n", "").strip();
-                }).toList();
-        List<String> diagnosticLines = lines.stream()
-                .map(line -> ECHO.matcher(line).find() || printedMessages.contains(line) ? "" : line).toList();
         int firstError = -1;
         for (int index = 0; index < lines.size(); index++) {
             String line = lines.get(index);
             if (BOUNDARY.matcher(line).find()) {
                 continue;
             }
-            if (firstError < 0 && !ECHO.matcher(line).find() && GENERIC_ERROR.matcher(line).find()) {
+            if (firstError < 0 && logContext.kind(index) != JobLogContext.Kind.SHELL_COMMAND
+                    && logContext.kind(index) != JobLogContext.Kind.STEP_METADATA
+                    && GENERIC_ERROR.matcher(line).find()) {
                 firstError = index;
             }
-            Match match = match(diagnosticLines, index);
+            Match match = match(logContext, index);
             if (match != null) {
                 Match previous = matches.get(match.rule().category());
                 if (previous == null || match.rule().confidence().compareTo(previous.rule().confidence()) > 0) {
@@ -196,7 +184,8 @@ public class FailureAnalyzerService {
         List<Integer> indices = firstError < 0 ? List.of() : List.of(firstError);
         return analysis(UNKNOWN,
                 firstError < 0 ? "No recognizable failure diagnostic found." : lines.get(firstError),
-                printedMessages.isEmpty()
+                java.util.stream.IntStream.range(0, lines.size())
+                        .noneMatch(index -> logContext.kind(index) == JobLogContext.Kind.PRINTED_OUTPUT)
                         ? "The available log evidence does not establish a supported failure category."
                         : "The available evidence does not establish a supported failure category. "
                                 + "The logs contain echoed or printed messages. These do not demonstrate a real connection "
@@ -217,7 +206,19 @@ public class FailureAnalyzerService {
                 evidence, logContext, fingerprint.normalizedSignature(), fingerprint.fingerprint());
     }
 
-    private Match match(List<String> lines, int index) {
+    static boolean hasPostgresConnectionEvidence(JobLogContext context, List<Integer> lineNumbers) {
+        for (int lineNumber : lineNumbers) {
+            Match match = match(context, lineNumber - 1);
+            if (match != null && match.rule().category() == POSTGRESQL_CONNECTION
+                    && match.evidenceIndices().stream().allMatch(index -> lineNumbers.contains(index + 1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Match match(JobLogContext logContext, int index) {
+        List<String> lines = logContext.diagnosticLines();
         String line = lines.get(index);
         for (Rule rule : RULES) {
             if (rule.pattern().matcher(line).find()) {
@@ -228,7 +229,7 @@ public class FailureAnalyzerService {
             // Only nearby connection-specific evidence counts, never a job-wide PostgreSQL mention.
             for (int nearby = Math.max(0, index - 2); nearby <= Math.min(lines.size() - 1, index + 2); nearby++) {
                 if (POSTGRES_CONNECTION_CONTEXT.matcher(lines.get(nearby)).find()
-                        && sameSection(lines, index, nearby)
+                        && sameSection(logContext.lines(), index, nearby)
                         && (nearby == index || !EXPLICIT_NETWORK_TARGET.matcher(line).find())) {
                     // A product name in prose is not evidence of a client operation.
                     if (!pattern("jdbc:postgresql:|org\\.postgresql\\.|\\bpsql\\b")
@@ -242,7 +243,8 @@ public class FailureAnalyzerService {
         }
         if (JAVA_ASSERTION.matcher(line).find()) {
             for (int nearby = index + 1; nearby <= Math.min(lines.size() - 1, index + 2); nearby++) {
-                if (JAVA_TEST_CONTEXT.matcher(lines.get(nearby)).find() && sameSection(lines, index, nearby)) {
+                if (JAVA_TEST_CONTEXT.matcher(lines.get(nearby)).find()
+                        && sameSection(logContext.lines(), index, nearby)) {
                     return new Match(ruleFor(JUNIT_TEST, HIGH), index, List.of(index, nearby));
                 }
             }
@@ -250,7 +252,7 @@ public class FailureAnalyzerService {
         return null;
     }
 
-    private boolean sameSection(List<String> lines, int first, int second) {
+    private static boolean sameSection(List<String> lines, int first, int second) {
         for (int index = Math.min(first, second); index <= Math.max(first, second); index++) {
             if (BOUNDARY.matcher(lines.get(index)).find()) {
                 return false;

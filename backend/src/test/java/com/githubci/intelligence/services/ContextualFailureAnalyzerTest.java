@@ -2,6 +2,7 @@ package com.githubci.intelligence.services;
 
 import java.util.List;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import com.githubci.intelligence.dto.*;
 import com.githubci.intelligence.exceptions.GitHubException;
@@ -99,6 +100,179 @@ class ContextualFailureAnalyzerTest {
         verifyNoInteractions(github);
         var mapper = JsonMapper.builder().build();
         assertEquals(result, mapper.readValue(mapper.writeValueAsString(result), FailureAnalysis.class));
+    }
+
+    @Test
+    void rejectsTheStoredRun39664424359AttributionOfflineWithoutTouchingPersistence() {
+        String logs = "setup\n".repeat(30) + """
+                Complete job name: intentional-failure
+                2026-10-21T19:45:42.1036000Z ##[group]Run echo "Error: Could not connect to PostgreSQL"
+                2026-10-21T19:45:42.1037855Z echo "Error: Could not connect to PostgreSQL"
+                2026-10-21T19:45:42.1039223Z exit 1
+                2026-10-21T19:45:42.1040000Z shell: /usr/bin/bash -e {0}
+                2026-10-21T19:45:42.1041000Z ##[endgroup]
+                2026-10-21T19:45:42.2334183Z Error: Could not connect to PostgreSQL
+                2026-10-21T19:45:42.2340000Z ##[error]Process completed with exit code 1.
+                """;
+        String json = """
+                {"suspectedCause":"The job failed to connect to PostgreSQL, resulting in an exit code of 1.",
+                 "suggestedInvestigation":"Investigate PostgreSQL service availability and credentials.",
+                 "findings":[
+                   {"kind":"OBSERVATION","logLines":[33,34,37]},
+                   {"kind":"HYPOTHESIS","description":"The job may have failed to connect to PostgreSQL.",
+                    "logLines":[33,34,37]}]}
+                """;
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json));
+        var result = analyze(logs);
+        assertEquals("JAVA", result.analysisSource());
+        assertEquals("BEDROCK_INVALID_RESPONSE", result.fallbackReason());
+        assertEquals(FailureCategory.UNKNOWN, result.category());
+        assertEquals(javaAnalyzer.analyze(logs).diagnosticFindings(), result.diagnosticFindings());
+        assertEquals(javaAnalyzer.analyze(logs).suspectedCause(), result.suspectedCause());
+        var request = ArgumentCaptor.forClass(ConverseRequest.class);
+        verify(client).converse(request.capture());
+        var input = JsonMapper.builder().build().readTree(
+                request.getValue().messages().getFirst().content().getFirst().text());
+        assertEquals("SHELL_COMMAND", input.get("logLineKinds").get("33").asString());
+        assertEquals("SHELL_COMMAND", input.get("logLineKinds").get("34").asString());
+        assertEquals("PRINTED_OUTPUT", input.get("logLineKinds").get("37").asString());
+        assertEquals("PROCESS_EXIT", input.get("logLineKinds").get("38").asString());
+        assertEquals(32, input.get("stepHeaderLines").get("37").asInt());
+        verifyNoInteractions(github);
+    }
+
+    @Test
+    void rejectsUnsupportedAttributionInEitherCauseOrHypothesisEvenWhenReferencesExist() {
+        for (String json : List.of(
+                validJson().replace("The step may intentionally fail; no outage is established.",
+                        "The PostgreSQL service may be unavailable."),
+                validJson().replace("This may be a simulated failure.",
+                        "The database connection may have failed."))) {
+            when(client.converse(any(ConverseRequest.class))).thenReturn(response(json));
+            var result = analyze(LOGS);
+            assertEquals("BEDROCK_INVALID_RESPONSE", result.fallbackReason());
+            assertEquals(javaAnalyzer.analyze(LOGS).evidence(), result.evidence());
+            assertNull(result.modelIdentifier());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "org.postgresql.util.PSQLException: Connection to db:5432 refused.",
+            "psql: error: connection to server at \"db\", port 5432 failed: Connection refused",
+            "org.postgresql.util.PSQLException: The connection attempt failed.\n"
+                    + "Caused by: java.net.ConnectException: Connection refused"
+    })
+    void acceptsGenuineClientDiagnosticsAsUnverifiedConnectionHypothesisEvidence(String diagnostic) {
+        String logs = "##[group]Run mvn verify\nmvn verify\n##[endgroup]\n" + diagnostic;
+        String json = """
+                {"suspectedCause":"A PostgreSQL connection may have failed; an outage is not established.",
+                 "suggestedInvestigation":"Check service readiness, credentials and the connection target.",
+                 "findings":[
+                   {"kind":"OBSERVATION","logLines":[4]},
+                   {"kind":"HYPOTHESIS","description":"PostgreSQL client connection settings may be incorrect.",
+                    "logLines":[4]}]}
+                """;
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json));
+        var result = analyze(logs);
+        assertEquals("BEDROCK", result.analysisSource());
+        assertEquals(FailureCategory.POSTGRESQL_CONNECTION, result.category());
+        assertEquals(ConfidenceLevel.HIGH, result.confidence());
+        assertEquals(ConfidenceLevel.LOW, result.diagnosticFindings().getLast().confidence());
+        assertEquals(diagnostic.lines().findFirst().orElseThrow(),
+                result.diagnosticFindings().getFirst().description());
+    }
+
+    @Test
+    void genuineExceptionElsewhereCannotJustifyAHypothesisThatCitesOnlyAnEcho() {
+        String logs = LOGS + """
+                ##[group]Run mvn verify
+                mvn verify
+                ##[endgroup]
+                org.postgresql.util.PSQLException: Connection to db:5432 refused.
+                """;
+        String json = validJson().replace("[2,3,5]", "[10]")
+                .replace("This may be a simulated failure.", "The database connection may have failed.");
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json));
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(logs).fallbackReason());
+    }
+
+    @Test
+    void connectionHypothesesRequireBothClientContextAndErrorInTheirOwnCitations() {
+        String logs = "Connecting to jdbc:postgresql://db/app\nError: connect ECONNREFUSED\n";
+        String json = validJson().replace("[2,3,5]", "[1,2]").replace("[2,3]", "[2]")
+                .replace("This may be a simulated failure.", "PostgreSQL credentials may be incorrect.");
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json));
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(logs).fallbackReason());
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json.replace(
+                "\"logLines\":[2]", "\"logLines\":[1,2]")));
+        assertEquals("BEDROCK", analyze(logs).analysisSource());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Error: Could not connect to PostgreSQL",
+            "Error: connect ECONNREFUSED 127.0.0.1:3000", "Error: Process completed with exit code 1."})
+    void ambiguousOutputStaysUnknownAndCannotSupportDatabaseAttribution(String logs) {
+        String uncertain = validJson().replace("[2,3,5]", "[1]").replace("[2,3]", "[1]")
+                .replace("The step may intentionally fail; no outage is established.",
+                        "The available output may be incomplete; the cause is unverified.")
+                .replace("This may be a simulated failure.", "The output may omit the failing operation.");
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(uncertain));
+        var result = analyze(logs);
+        assertEquals("BEDROCK", result.analysisSource());
+        assertEquals(FailureCategory.UNKNOWN, result.category());
+        assertEquals(ConfidenceLevel.LOW, result.confidence());
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(uncertain.replace(
+                "The output may omit the failing operation.", "A PostgreSQL connection may have failed.")));
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(logs).fallbackReason());
+    }
+
+    @Test
+    void prioritizesTheShellBlockEvenWhenItIsFarFromBothSetupAndTheFinalExit() {
+        String logs = "Complete job name: intentional-failure\n" + "setup\n".repeat(199) + """
+                ##[group]Run echo "Error: Could not connect to PostgreSQL"
+                echo "Error: Could not connect to PostgreSQL"
+                exit 1
+                shell: /usr/bin/bash -e {0}
+                env:
+                  TOKEN: test-secret-token
+                ##[endgroup]
+                Error: Could not connect to PostgreSQL
+                """ + "output\n".repeat(100) + "Error: Process completed with exit code 1.\n";
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(
+                validJson().replace("[2,3,5]", "[202,203,208]").replace("[2,3]", "[202,203]")));
+        assertEquals("BEDROCK", analyze(logs).analysisSource());
+        var request = ArgumentCaptor.forClass(ConverseRequest.class);
+        verify(client).converse(request.capture());
+        String text = request.getValue().messages().getFirst().content().getFirst().text();
+        var input = JsonMapper.builder().build().readTree(text);
+        assertTrue(input.get("logs").size() <= 100);
+        input.get("logs").forEach(line -> assertTrue(line.asString().length() <= 500));
+        assertTrue(input.get("logs").get("201").asString().contains("Run echo"));
+        assertEquals("SHELL_COMMAND", input.get("logLineKinds").get("202").asString());
+        assertEquals("SHELL_COMMAND", input.get("logLineKinds").get("203").asString());
+        assertEquals("STEP_METADATA", input.get("logLineKinds").get("204").asString());
+        assertEquals("PRINTED_OUTPUT", input.get("logLineKinds").get("208").asString());
+        assertFalse(text.contains("test-secret-token"));
+    }
+
+    @Test
+    void usesFailedStepTimesToIncludeOtherwiseUnremarkableMiddleOfLogContext() {
+        String logs = "setup\n".repeat(39) + "2026-10-21T19:45:42.1037855Z custom-check\n"
+                + "output\n".repeat(100);
+        var timedJob = new GitHubJob(7, 39549084142L, "Check", "completed", "failure",
+                null, null, null, List.of(new GitHubJobStep("Custom check", 2, "completed", "failure",
+                        Instant.parse("2026-10-21T19:45:42Z"), Instant.parse("2026-10-21T19:45:42Z"))));
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(
+                validJson().replace("[2,3,5]", "[40]").replace("[2,3]", "[40]")));
+        var result = analyzer.analyze(logs, timedJob, "octo", "demo", "a".repeat(40), javaAnalyzer.analyze(logs));
+        assertEquals("BEDROCK", result.analysisSource());
+        var request = ArgumentCaptor.forClass(ConverseRequest.class);
+        verify(client).converse(request.capture());
+        var input = JsonMapper.builder().build().readTree(
+                request.getValue().messages().getFirst().content().getFirst().text());
+        assertTrue(input.get("logs").get("40").asString().contains("custom-check"));
+        assertEquals("Custom check", input.get("failedSteps").get(0).get("name").asString());
     }
 
     @Test
