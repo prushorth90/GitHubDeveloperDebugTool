@@ -10,6 +10,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
 import com.githubci.intelligence.dto.FailureCategory;
 import com.githubci.intelligence.dto.WorkflowAnalytics;
 import com.githubci.intelligence.dto.WorkflowAnalytics.DailyRate;
@@ -17,12 +20,11 @@ import com.githubci.intelligence.dto.WorkflowEvent;
 import com.githubci.intelligence.exceptions.FailureReadException;
 import com.githubci.intelligence.models.AnalysisStatus;
 import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
+
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import tools.jackson.core.JacksonException;
-
+// analytic service
 @Service
 public class AnalyticsService {
     private final WorkflowAnalysisRepository repository;
