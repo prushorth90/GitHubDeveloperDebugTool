@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["suspectedCause", "suggestedInvestigation", "findings"],
+  "properties": {
+    "suspectedCause": {"$ref": "#/$defs/text"},
+    "suggestedInvestigation": {"$ref": "#/$defs/text"},
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "logLines"],
+            "properties": {
+              "kind": {"const": "OBSERVATION"},
+              "logLines": {"$ref": "#/$defs/logLines"}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "description", "logLines"],
+            "properties": {
+              "kind": {"const": "HYPOTHESIS"},
+              "description": {"$ref": "#/$defs/text"},
+              "logLines": {"$ref": "#/$defs/logLines"}
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 1500, "pattern": "\\S"},
+    "logLines": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    }
+  }
+}

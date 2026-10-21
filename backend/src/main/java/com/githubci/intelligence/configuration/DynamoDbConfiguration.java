@@ -4,6 +4,7 @@ import java.net.URI;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
@@ -24,7 +25,7 @@ public class DynamoDbConfiguration {
     public DynamoDbClient dynamoDbClient(
             @Value("${app.dynamodb.endpoint}") String endpoint,
             @Value("${app.dynamodb.region}") String region,
-            DefaultCredentialsProvider credentials) {
+            @Qualifier("dynamoDbCredentialsProvider") DefaultCredentialsProvider credentials) {
         var builder = DynamoDbClient.builder()
                 .region(Region.of(region))
                 .credentialsProvider(credentials)

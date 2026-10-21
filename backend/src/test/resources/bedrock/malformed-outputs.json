@@ -1,0 +1,20 @@
+[
+  {"name": "prose before JSON", "output": "Here is the analysis:\n$VALID"},
+  {"name": "prose after JSON", "output": "$VALID\nThe database is definitely down."},
+  {"name": "prose outside fence", "output": "Analysis:\n```json\n$VALID\n```"},
+  {"name": "suffix outside fence", "output": "```json\n$VALID\n```\nDone."},
+  {"name": "wrong fence language", "output": "```javascript\n$VALID\n```"},
+  {"name": "unclosed fence", "output": "```json\n$VALID"},
+  {"name": "inline fence", "output": "```json $VALID```"},
+  {"name": "multiple fenced objects", "output": "```json\n$VALID\n```\n```json\n$VALID\n```"},
+  {"name": "multiple JSON values", "output": "$VALID {}"},
+  {"name": "multiple JSON values inside fence", "output": "```json\n$VALID {}\n```"},
+  {"name": "duplicate object keys", "output": "{\"suspectedCause\":\"a\",\"suspectedCause\":\"b\",\"suggestedInvestigation\":\"check\",\"findings\":[{\"kind\":\"OBSERVATION\",\"logLines\":[5]}]}"},
+  {"name": "duplicate finding keys", "output": "{\"suspectedCause\":\"a\",\"suggestedInvestigation\":\"check\",\"findings\":[{\"kind\":\"OBSERVATION\",\"logLines\":[999],\"logLines\":[5]}]}"},
+  {"name": "trailing comma", "output": "{\"suspectedCause\":\"a\",}"},
+  {"name": "array root", "output": "[$VALID]"},
+  {"name": "null finding", "output": "{\"suspectedCause\":\"a\",\"suggestedInvestigation\":\"check\",\"findings\":[null]}"},
+  {"name": "empty findings", "output": "{\"suspectedCause\":\"a\",\"suggestedInvestigation\":\"check\",\"findings\":[]}"},
+  {"name": "too many findings", "output": "{\"suspectedCause\":\"a\",\"suggestedInvestigation\":\"check\",\"findings\":[{\"kind\":\"OBSERVATION\",\"logLines\":[1]},{\"kind\":\"OBSERVATION\",\"logLines\":[2]},{\"kind\":\"OBSERVATION\",\"logLines\":[3]},{\"kind\":\"OBSERVATION\",\"logLines\":[4]},{\"kind\":\"OBSERVATION\",\"logLines\":[5]},{\"kind\":\"OBSERVATION\",\"logLines\":[6]},{\"kind\":\"OBSERVATION\",\"logLines\":[1]}]}"},
+  {"name": "missing hypothesis description", "output": "{\"suspectedCause\":\"a\",\"suggestedInvestigation\":\"check\",\"findings\":[{\"kind\":\"HYPOTHESIS\",\"logLines\":[5]}]}"}
+]

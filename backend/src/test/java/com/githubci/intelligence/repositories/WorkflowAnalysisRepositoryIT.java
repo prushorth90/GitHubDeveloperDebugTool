@@ -28,6 +28,7 @@ import com.githubci.intelligence.services.AnalyticsService;
 import com.githubci.intelligence.services.FailureService;
 import com.githubci.intelligence.models.AnalysisStatus;
 import com.githubci.intelligence.services.FailureAnalyzerService;
+import com.githubci.intelligence.services.ContextualFailureAnalyzer;
 import com.githubci.intelligence.services.GitHubService;
 import com.githubci.intelligence.services.LogRedactionService;
 import com.githubci.intelligence.services.LogStorageService;
@@ -38,6 +39,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.testcontainers.containers.GenericContainer;
@@ -49,6 +51,14 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
+import software.amazon.awssdk.services.bedrockruntime.model.ContentBlock;
+import software.amazon.awssdk.services.bedrockruntime.model.ConversationRole;
+import software.amazon.awssdk.services.bedrockruntime.model.ConverseOutput;
+import software.amazon.awssdk.services.bedrockruntime.model.ConverseRequest;
+import software.amazon.awssdk.services.bedrockruntime.model.ConverseResponse;
+import software.amazon.awssdk.services.bedrockruntime.model.Message;
+import software.amazon.awssdk.services.bedrockruntime.model.StopReason;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.BillingMode;
@@ -72,6 +82,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -214,12 +225,26 @@ class WorkflowAnalysisRepositoryIT {
     void persistsBedrockProvenanceAndFindingsThroughTheExistingRestDetail() throws Exception {
         var base = failure(42);
         var failedJob = base.failedJobs().getFirst();
-        var javaAnalysis = failedJob.analysis();
-        var explanation = new com.githubci.intelligence.dto.FailureAnalysis(
-                javaAnalysis.category(), javaAnalysis.errorMessage(), javaAnalysis.suspectedCause(),
-                javaAnalysis.suggestedInvestigation(), javaAnalysis.confidence(), javaAnalysis.evidence(),
-                javaAnalysis.logContext(), javaAnalysis.normalizedSignature(), javaAnalysis.fingerprint(),
-                "BEDROCK", "mock-model", javaAnalysis.diagnosticFindings(), null);
+        String logs = "echo \"database down\"";
+        var javaAnalysis = ANALYZER.analyze(logs);
+        var bedrock = mock(BedrockRuntimeClient.class);
+        when(bedrock.converse(any(ConverseRequest.class))).thenReturn(ConverseResponse.builder()
+                .stopReason(StopReason.END_TURN)
+                .output(ConverseOutput.fromMessage(Message.builder().role(ConversationRole.ASSISTANT)
+                        .content(ContentBlock.fromText("""
+                                ```json
+                                {"suspectedCause":"An outage is not established.",
+                                 "suggestedInvestigation":"Inspect the workflow command.",
+                                 "findings":[{"kind":"OBSERVATION","logLines":[1]},
+                                   {"kind":"HYPOTHESIS","description":"This may be simulated.","logLines":[1]}]}
+                                ```
+                                """)).build())).build());
+        var beans = new StaticListableBeanFactory();
+        beans.addBean("bedrock", bedrock);
+        var analyzer = new ContextualFailureAnalyzer(beans.getBeanProvider(BedrockRuntimeClient.class),
+                JsonMapper.builder().build(), new LogRedactionService("", ""), mock(GitHubService.class),
+                "mock-model", false);
+        var explanation = analyzer.analyze(logs, failedJob.job(), "octo", "demo", null, javaAnalysis);
         var enriched = new WorkflowRunAnalysis(base.repository(), base.runId(), List.of(
                 new FailedJobAnalysis(failedJob.job(), failedJob.logStatus(), failedJob.logMessage(),
                         explanation, failedJob.logObjectKey())));
@@ -230,9 +255,16 @@ class WorkflowAnalysisRepositoryIT {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.failedJobs[0].analysis.analysisSource").value("BEDROCK"))
                 .andExpect(jsonPath("$.data.failedJobs[0].analysis.modelIdentifier").value("mock-model"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.confidence").value("LOW"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.fingerprint").value(javaAnalysis.fingerprint()))
                 .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].kind").value("OBSERVATION"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].confidence").value("HIGH"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[1].kind").value("HYPOTHESIS"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[1].confidence").value("LOW"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].description").value(logs))
                 .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].evidence[0].lineNumber")
-                        .value(javaAnalysis.evidence().getFirst().lineNumber()));
+                        .value(1))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].evidence[0].text").value(logs));
     }
 
     @Test

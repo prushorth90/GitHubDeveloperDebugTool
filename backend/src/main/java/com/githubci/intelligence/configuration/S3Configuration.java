@@ -4,6 +4,7 @@ import java.net.URI;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
@@ -19,7 +20,7 @@ public class S3Configuration {
             @Value("${app.s3.endpoint}") String endpoint,
             @Value("${app.s3.region}") String region,
             @Value("${app.s3.path-style-access}") boolean pathStyle,
-            DefaultCredentialsProvider credentials) {
+            @Qualifier("dynamoDbCredentialsProvider") DefaultCredentialsProvider credentials) {
         var builder = S3Client.builder()
                 .region(Region.of(region))
                 .credentialsProvider(credentials)

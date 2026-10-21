@@ -3,10 +3,13 @@ package com.githubci.intelligence.configuration;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.retries.StandardRetryStrategy;
@@ -16,8 +19,16 @@ import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
 public class BedrockConfiguration {
     @Bean(destroyMethod = "close")
     @ConditionalOnProperty(name = "app.bedrock.enabled", havingValue = "true")
+    public AwsCredentialsProvider bedrockCredentialsProvider(
+            @Value("${app.bedrock.profile:}") String profile) {
+        return profile.isBlank() ? DefaultCredentialsProvider.builder().build()
+                : ProfileCredentialsProvider.builder().profileName(profile).build();
+    }
+
+    @Bean(destroyMethod = "close")
+    @ConditionalOnProperty(name = "app.bedrock.enabled", havingValue = "true")
     public BedrockRuntimeClient bedrockRuntimeClient(
-            DefaultCredentialsProvider credentials,
+            @Qualifier("bedrockCredentialsProvider") AwsCredentialsProvider credentials,
             @Value("${app.bedrock.region}") String region,
             @Value("${app.bedrock.model-id}") String modelId) {
         if (modelId.isBlank()) {

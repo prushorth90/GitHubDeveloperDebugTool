@@ -632,14 +632,32 @@ export BEDROCK_MODEL_ID='<Converse-compatible model ID or inference-profile ID/A
 export BEDROCK_INCLUDE_COMMIT_CHANGES=true
 ```
 
-Provide real credentials through the SDK default chain, preferably a workload IAM
-role in AWS or an authenticated `AWS_PROFILE` locally. For temporary environment
-credentials, supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
-`AWS_SESSION_TOKEN`. Remove dummy `local` environment credentials before using a
-profile, because environment credentials take precedence. Maven does not read
-`.env`. The provided Compose backend uses dummy credentials and does not forward
-Bedrock settings; use a host-run backend for live testing, or deliberately provide
-a secure deployment/Compose override. Never put credentials in React/Vite variables.
+Bedrock has its own credentials provider. Set `BEDROCK_AWS_PROFILE` to use an
+explicit SDK profile, bypassing environment credentials for **Bedrock only**.
+When blank, Bedrock uses its own default chain (prefer a workload IAM role in AWS).
+S3, SQS and DynamoDB retain their existing provider and endpoints. Maven does not
+read `.env`. Never put credentials in React/Vite variables.
+
+For Docker with local emulators and an existing AWS SSO profile:
+
+```sh
+aws sso login --profile prushorthaws
+# backend/.env: BEDROCK_ENABLED=true, BEDROCK_REGION=us-west-2,
+# BEDROCK_MODEL_ID=us.amazon.nova-lite-v1:0,
+# BEDROCK_AWS_PROFILE=prushorthaws, BEDROCK_INCLUDE_COMMIT_CHANGES=false
+docker compose --env-file backend/.env \
+  -f docker-compose.yml -f docker-compose.bedrock.yml up -d --build backend frontend
+```
+
+The opt-in overlay mounts only `~/.aws/config` and `~/.aws/sso/cache` read-only
+under the non-root backend user's home. It does not mount shared static credentials
+or copy credentials into the image. Keep dummy `local` credentials and local
+endpoints for S3/SQS/DynamoDB; do not set a global `AWS_PROFILE` or replace those
+credentials. Both SSO SDK modules are included for profile resolution.
+Authenticate/refresh on the host with `aws sso login --profile prushorthaws`;
+the read-only container cannot persist refreshed SSO tokens. Restart the backend
+after refreshing if necessary. Missing mounts fail startup rather than creating
+empty directories. Plain Compose remains emulator-only by default.
 
 The backend role needs **`bedrock:InvokeModel`** on the chosen foundation model
 or inference profile (Converse has no separate IAM action). Cross-region inference
@@ -661,13 +679,53 @@ patches and model output, but cannot guarantee removal of arbitrary application
 secrets or sensitive business data; review your data policy before opting in.
 Logs/patches are treated as untrusted data, never prompt instructions.
 
-Responses must be a strict JSON object with bounded, nonempty fields and 1-6
-typed findings. Every observation must cite supplied log lines, all references
-are validated, hypothesis confidence must be LOW, and finding confidence cannot
-exceed the Java classification confidence. Observation descriptions must exactly
-quote a cited line; model interpretation is only allowed as a hypothesis.
-Referenced text is copied from the
-sanitized input, not trusted from the model. Invalid/truncated/refused responses,
+Responses must be one JSON object, optionally enclosed in a single whole-response
+Markdown fence (bare or `json`, with opening/closing fences on their own lines).
+Surrounding whitespace is allowed, but prose outside the JSON/fence, duplicate
+object keys, multiple objects, malformed JSON and other fence languages are rejected.
+The model-only contract is defined in
+[the response JSON Schema](backend/src/main/resources/bedrock-analysis-response.schema.json)
+and included in the prompt:
+
+```json
+{
+  "suspectedCause": "The failure may be intentional; an outage is not established.",
+  "suggestedInvestigation": "Inspect the failed workflow command.",
+  "findings": [
+    {"kind": "OBSERVATION", "logLines": [5]},
+    {"kind": "HYPOTHESIS", "description": "This may be a simulated failure.", "logLines": [2, 3]}
+  ]
+}
+```
+
+All text fields are nonblank and at most 1,500 characters; 1-6 findings are
+required. Every finding must cite 1-8 distinct integer IDs that were actually
+submitted. IDs are stable, one-based positions in the original sanitized job
+log, not source-code lines or positions in a compacted excerpt. Java resolves
+them against the original sanitized logs, never model quotations. Observations
+return only `kind` and `logLines`; Java sets their description to the first
+resolved line and attaches every exact cited line as evidence. References to
+original lines over the existing 2,000-character evidence bound cause fallback,
+rather than persisting unbounded data or silently substituting truncated text.
+
+The model must not return confidence fields. Java assigns observation confidence
+`HIGH` **only for the fact that this literal text occurs in the log**, not the truth
+of the logged claim or the root cause. Interpretations are `HYPOTHESIS` findings
+with backend-assigned `LOW` confidence and are displayed as unverified.
+Observation confidence is independent of classification confidence (which is
+unchanged), not a promotion of the diagnosis. Extra fields, observation
+descriptions/model quotations, unsupported kinds and model-supplied confidence
+are rejected, not silently corrected.
+
+[AWS lists Nova Lite v1 as not supporting native structured outputs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-lite.html).
+Converse's native `outputConfig.textFormat` schema-constrained mode is therefore
+not enabled for `us.amazon.nova-lite-v1:0`. Nova's
+[schema-guided tool calling](https://docs.aws.amazon.com/nova/latest/userguide/tool-use-definition.html)
+is not strict schema enforcement and supports only limited schema features.
+This implementation keeps the existing text response path and validates locally;
+the schema in the prompt is not a claim of server-enforced compliance.
+
+Invalid/truncated/refused responses,
 throttling, missing credentials, permission failures and SDK transport failures
 produce explicit Java fallback reasons; prompts/upstream errors are not logged.
 Schema validation cannot prove the model's interpretation is correct: the UI
@@ -687,6 +745,34 @@ explicitly disable Bedrock, even if it is enabled in your shell:
 ```sh
 mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest,ContextualFailureAnalyzerTest,WorkflowRunAnalysisIntegrationTest test
 ```
+
+`BedrockLiveIT` is separately gated by `BEDROCK_LIVE_TEST=true` and requires
+`BEDROCK_LIVE_RESPONSE_FILE` pointing to a writable local capture file. It runs
+against the Compose network with dummy emulator credentials and read-only SSO
+mounts, mocks GitHub with a six-line synthetic compiler failure, and permits only
+one SDK invocation (automatic retries are disabled). It uses an isolated temporary
+queue and a new run ID, caps the test request at 600 output tokens without changing
+the model response, and refuses to overwrite an existing run. It retains synthetic
+analyses/logs in the local table/bucket for inspection,
+and checks provenance, exact S3 round-trip, REST persistence and duplicate
+delivery handling. Do not enable this gate in normal CI: it incurs model charges.
+
+The Nova Lite verification on 2026-10-21 authenticated successfully, but its old
+response failed validation: Markdown fencing, a modified observation quote and a
+MEDIUM-confidence hypothesis. The captured synthetic response remains an unchanged
+offline fixture. Tests reproduce its rejection, then explicitly migrate a copy to
+the new ID-only contract: Java restores the exact log text and assigns confidence.
+There is no production adapter silently accepting old model-authored observations
+or confidence. No paid calls were made during the compatibility implementation.
+A subsequent single live verification on 2026-10-21 passed the production parser
+and evidence validator without repairing the response: 782 input tokens, 179
+output tokens, a 600-output-token cap, and normal `end_turn` completion. The fenced
+response used observation IDs 1-6 and hypothesis IDs 2-3; Java attached exact
+sanitized evidence and assigned HIGH/LOW finding confidence respectively.
+The new synthetic run `1792611408443`, attempt 1, was persisted as `BEDROCK` with
+model `us.amazon.nova-lite-v1:0` and no fallback reason. Duplicate delivery made no
+second model call. The deployed detail API and dashboard proxy returned the same
+result. Existing completed fallback results remain immutable and were not rewritten.
 
 Evidence and context can contain sensitive raw log content; treat the result
 with the same access controls as the source logs and do not log it automatically.

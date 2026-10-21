@@ -48,9 +48,9 @@ describe('persisted workflow failures', () => {
   it('distinguishes observations, hypotheses, provenance, and supporting log references', async () => {
     vi.mocked(getWorkflowFailure).mockResolvedValue({
       ...failure, failedJobs: [{ ...failure.failedJobs[0], analysis: {
-        ...failure.failedJobs[0].analysis!, analysisSource: 'BEDROCK', modelIdentifier: 'test-model',
+        ...failure.failedJobs[0].analysis!, confidence: 'LOW', analysisSource: 'BEDROCK', modelIdentifier: 'test-model',
         diagnosticFindings: [
-          { kind: 'OBSERVATION', description: 'The command printed an error.', confidence: 'LOW',
+          { kind: 'OBSERVATION', description: 'echo "Error: Could not connect to PostgreSQL"', confidence: 'HIGH',
             evidence: [{ lineNumber: 5, text: 'echo "Error: Could not connect to PostgreSQL"' }] },
           { kind: 'HYPOTHESIS', description: 'The failure may be intentional.', confidence: 'LOW', evidence: [] },
         ],
@@ -60,9 +60,34 @@ describe('persisted workflow failures', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Run 99 / attempt 2' }));
     await screen.findByText('Source: BEDROCK');
     expect(screen.getByText('Model: test-model')).toBeDefined();
+    expect(screen.getByText('Classification confidence: LOW')).toBeDefined();
     expect(screen.getByText('Hypothesis (unverified) / LOW')).toBeDefined();
-    await userEvent.click(screen.getByRole('button', { name: /Observation \/ LOW/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Observation \/ HIGH/ }));
+    expect(screen.getByText(/Observation confidence concerns log text/)).toBeDefined();
     expect(screen.getByText('Line 5: echo "Error: Could not connect to PostgreSQL"')).toBeDefined();
+  });
+
+  it('renders model hypotheses and resolved log text as text, never HTML', async () => {
+    const text = '<img src=x onerror="alert(1)">';
+    vi.mocked(getWorkflowFailure).mockResolvedValue({
+      ...failure, failedJobs: [{ ...failure.failedJobs[0], analysis: {
+        ...failure.failedJobs[0].analysis!, analysisSource: 'BEDROCK',
+        diagnosticFindings: [
+          { kind: 'OBSERVATION', description: text, confidence: 'HIGH',
+            evidence: [{ lineNumber: 3, text }] },
+          { kind: 'HYPOTHESIS', description: `Unverified: ${text}`, confidence: 'LOW',
+            evidence: [{ lineNumber: 3, text }] },
+        ],
+      } }],
+    });
+    const view = dashboard();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run 99 / attempt 2' }));
+    await screen.findByText(text);
+    expect(screen.getByText(`Unverified: ${text}`)).toBeDefined();
+    expect(screen.getByText('Hypothesis (unverified) / LOW')).toBeDefined();
+    await userEvent.click(screen.getByRole('button', { name: /Observation \/ HIGH/ }));
+    expect(screen.getAllByText(`Line 3: ${text}`)).toHaveLength(2);
+    expect(view.container.querySelector('img')).toBeNull();
   });
 
   it('identifies legacy analyses and explicit Java fallback reasons', async () => {

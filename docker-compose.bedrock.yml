@@ -1,0 +1,22 @@
+services:
+  backend:
+    environment:
+      BEDROCK_ENABLED: ${BEDROCK_ENABLED:-true}
+      BEDROCK_REGION: ${BEDROCK_REGION:-us-west-2}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.amazon.nova-lite-v1:0}
+      BEDROCK_AWS_PROFILE: ${BEDROCK_AWS_PROFILE:-prushorthaws}
+      AWS_CONFIG_FILE: /home/app/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /home/app/.aws/no-shared-credentials
+    volumes:
+      - type: bind
+        source: ${HOME}/.aws/config
+        target: /home/app/.aws/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOME}/.aws/sso/cache
+        target: /home/app/.aws/sso/cache
+        read_only: true
+        bind:
+          create_host_path: false

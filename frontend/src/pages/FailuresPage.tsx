@@ -145,6 +145,9 @@ export default function FailuresPage() {
                   </Stack>
                 </AccordionSummary>
                 <AccordionDetails>
+                  {finding.kind === 'OBSERVATION' && <Typography variant="body2">
+                    Observation confidence concerns log text, not whether its claims are true or establish a root cause.
+                  </Typography>}
                   <Typography variant="subtitle2">Supporting sanitized job log references</Typography>
                   <Box component="pre" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
                     {finding.evidence.map((line) => `Line ${line.lineNumber}: ${line.text}`).join('\n')

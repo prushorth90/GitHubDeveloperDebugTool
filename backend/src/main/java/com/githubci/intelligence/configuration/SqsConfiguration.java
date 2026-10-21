@@ -4,6 +4,7 @@ import java.net.URI;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -20,7 +21,7 @@ public class SqsConfiguration {
     public SqsClient sqsClient(
             @Value("${app.sqs.endpoint}") String endpoint,
             @Value("${app.sqs.region}") String region,
-            DefaultCredentialsProvider credentials) {
+            @Qualifier("dynamoDbCredentialsProvider") DefaultCredentialsProvider credentials) {
         var builder = SqsClient.builder()
                 .region(Region.of(region)).credentialsProvider(credentials)
                 .httpClientBuilder(UrlConnectionHttpClient.builder()

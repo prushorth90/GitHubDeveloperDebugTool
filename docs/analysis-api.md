@@ -72,8 +72,13 @@ Failure analysis retains its existing fields and adds `analysisSource` (`JAVA`,
 and `diagnosticFindings`. Each finding has `kind` (`OBSERVATION` or `HYPOTHESIS`),
 `description`, `confidence` (`LOW`, `MEDIUM`, `HIGH`) and `evidence`
 (`[{lineNumber,text}]`). Line numbers are one-based positions in the sanitized
-job log, not workflow source lines; Bedrock reference text is copied from the
-actual submitted excerpts. Hypotheses have LOW confidence and are unverified.
+job log, not workflow source lines. Bedrock returns only line IDs for observations;
+Java resolves IDs to exact original sanitized text, using the first cited line as
+the observation description. All cited lines must have been submitted to the model.
+New Bedrock observation confidence is backend-assigned HIGH for literal log
+presence, **not** the truth of the logged claim. Hypothesis confidence is
+backend-assigned LOW and all root causes remain unverified. The model cannot
+provide either confidence value or supply its own observation quotation.
 The existing top-level confidence rates category evidence, not root-cause certainty.
 Bedrock explanations retain Java categories/fingerprints, so existing filters,
 similarity and analytics semantics remain stable.
