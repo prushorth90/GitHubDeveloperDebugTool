@@ -1,0 +1,78 @@
+name: Diagnostic Test - JUnit Assertion
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  junit-assertion:
+    name: Real JUnit assertion with unequal expected and actual values
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIAGNOSTIC_DIR: ${{ runner.temp }}/diagnostic-junit
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Prepare isolated JUnit project
+        shell: bash
+        run: |
+          mkdir -p "$DIAGNOSTIC_DIR/src/test/java/diagnostic"
+          cat > "$DIAGNOSTIC_DIR/pom.xml" <<'XML'
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>diagnostic</groupId>
+            <artifactId>intentional-junit-failure</artifactId>
+            <version>1.0</version>
+            <properties>
+              <maven.compiler.release>21</maven.compiler.release>
+              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+            </properties>
+            <dependencies>
+              <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>5.11.4</version>
+                <scope>test</scope>
+              </dependency>
+            </dependencies>
+            <build>
+              <plugins>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-compiler-plugin</artifactId>
+                  <version>3.13.0</version>
+                </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-surefire-plugin</artifactId>
+                  <version>3.5.2</version>
+                </plugin>
+              </plugins>
+            </build>
+          </project>
+          XML
+          cat > "$DIAGNOSTIC_DIR/src/test/java/diagnostic/DiagnosticAssertionTest.java" <<'JAVA'
+          package diagnostic;
+
+          import org.junit.jupiter.api.Test;
+          import static org.junit.jupiter.api.Assertions.assertEquals;
+
+          class DiagnosticAssertionTest {
+              @Test
+              void reportsAnActualAssertionMismatch() {
+                  assertEquals(200, 503, "Diagnostic assertion: expected and actual deliberately differ");
+              }
+          }
+          JAVA
+      - name: Compile the isolated test before executing it
+        working-directory: ${{ env.DIAGNOSTIC_DIR }}
+        run: mvn --batch-mode --no-transfer-progress -Dstyle.color=never test-compile
+      - name: Execute the real failing JUnit assertion
+        working-directory: ${{ env.DIAGNOSTIC_DIR }}
+        run: mvn --batch-mode --no-transfer-progress -Dstyle.color=never test

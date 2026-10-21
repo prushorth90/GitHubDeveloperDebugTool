@@ -4,16 +4,22 @@ import java.util.List;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.githubci.intelligence.dto.*;
 import com.githubci.intelligence.exceptions.GitHubException;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
 import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
 import software.amazon.awssdk.services.bedrockruntime.model.*;
 import tools.jackson.databind.json.JsonMapper;
@@ -37,10 +43,22 @@ class ContextualFailureAnalyzerTest {
             Error: Process completed with exit code 1.
             """;
     private ContextualFailureAnalyzer analyzer;
+    private Logger logger;
+    private ListAppender<ILoggingEvent> appender;
 
     @BeforeEach
     void setup() {
         analyzer = analyzer(true, false);
+        logger = (Logger) LoggerFactory.getLogger(ContextualFailureAnalyzer.class);
+        appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+    }
+
+    @AfterEach
+    void detachAppender() {
+        logger.detachAppender(appender);
+        appender.stop();
     }
 
     private ContextualFailureAnalyzer analyzer(boolean enabled, boolean changes) {
@@ -48,7 +66,7 @@ class ContextualFailureAnalyzerTest {
         ObjectProvider<BedrockRuntimeClient> provider = mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenReturn(enabled ? client : null);
         return new ContextualFailureAnalyzer(provider, JsonMapper.builder().build(), redactor, github,
-                "test-model", changes);
+                "test-model", changes, "us-west-2", "test-profile");
     }
 
     private ConverseResponse response(String json) {
@@ -336,6 +354,216 @@ class ContextualFailureAnalyzerTest {
         when(client.converse(any(ConverseRequest.class))).thenReturn(
                 response(validJson()).toBuilder().stopReason(StopReason.MAX_TOKENS).build());
         assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+    }
+
+    @Test
+    void acceptsConverseTextBlocksIncludingAFenceAndJsonSplitAcrossBlocks() {
+        String text = "```json\n" + validJson() + "\n```";
+        for (int split : List.of(4, 25, text.length() - 3)) {
+            appender.list.clear();
+            var message = Message.builder().role(ConversationRole.ASSISTANT).content(
+                    ContentBlock.fromText(text.substring(0, split)),
+                    ContentBlock.fromText(text.substring(split))).build();
+            when(client.converse(any(ConverseRequest.class))).thenReturn(
+                    response(validJson()).toBuilder().output(ConverseOutput.fromMessage(message)).build());
+            var result = analyze(LOGS);
+            assertEquals("BEDROCK", result.analysisSource());
+            assertNull(result.fallbackReason());
+            assertEquals(javaAnalyzer.analyze(LOGS).fingerprint(), result.fingerprint());
+            assertEquals(new LogEvidence(2, "  echo \"Error: Could not connect to PostgreSQL\""),
+                    result.diagnosticFindings().getFirst().evidence().getFirst());
+            assertTrue(appender.list.isEmpty());
+        }
+    }
+
+    @Test
+    void rejectsNonTextConverseBlocksAndEnforcesTheCombinedSizeBound() {
+        for (List<ContentBlock> blocks : List.of(
+                List.of(ContentBlock.fromText(validJson()), ContentBlock.builder()
+                        .toolUse(ToolUseBlock.builder().toolUseId("test").name("test").build()).build()),
+                List.of(ContentBlock.fromText(validJson()), ContentBlock.fromText(" ".repeat(16000))))) {
+            appender.list.clear();
+            when(client.converse(any(ConverseRequest.class))).thenReturn(response(validJson()).toBuilder()
+                    .output(ConverseOutput.fromMessage(Message.builder().role(ConversationRole.ASSISTANT)
+                            .content(blocks).build())).build());
+            assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+            assertTrue(appender.list.getFirst().getFormattedMessage().contains("stage=ENVELOPE"));
+        }
+        assertTrue(appender.list.getFirst().getFormattedMessage().contains("reason=RESPONSE_SIZE"));
+    }
+
+    @Test
+    void diagnosesTruncationWithoutTryingToParseOrRepairPartialJson() {
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response("{private-incomplete-output")
+                .toBuilder().stopReason(StopReason.MAX_TOKENS).build());
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+        String message = appender.list.getFirst().getFormattedMessage();
+        assertTrue(message.contains("stage=ENVELOPE"));
+        assertTrue(message.contains("reason=INCOMPLETE_RESPONSE"));
+        assertTrue(message.contains("stopReason=MAX_TOKENS"));
+        assertFalse(message.contains("private-incomplete-output"));
+        assertNull(appender.list.getFirst().getThrowableProxy());
+    }
+
+    @Test
+    void plainIllegalArgumentExceptionReachesStructuredHandlerWithoutLoggingItsMessage() {
+        when(client.converse(any(ConverseRequest.class))).thenThrow(
+                new IllegalArgumentException("private-response-marker"));
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+        String warning = appender.list.getFirst().getFormattedMessage();
+        assertTrue(warning.startsWith("Bedrock response rejected: workflowRunId="));
+        assertTrue(warning.contains("stage=REQUEST"));
+        assertTrue(warning.contains("reason=INVALID_VALUE"));
+        assertFalse(warning.contains("private-response-marker"));
+        assertFalse(warning.contains("Bedrock response rejected ("));
+        assertNull(appender.list.getFirst().getThrowableProxy());
+    }
+
+    @Test
+    void separatesFormattingSchemaReferenceAndAttributionRejectionsWithoutExposingOutput() {
+        String[][] cases = {
+                {"not-json-private-output", "JSON", "JSON_DESERIALIZATION"},
+                {validJson().replace("\"findings\":", "\"private-extra-field\":true,\"findings\":"),
+                        "SCHEMA", "INVALID_FIELDS"},
+                {validJson().replace("\"OBSERVATION\"", "\"private-invalid-kind\""),
+                        "SCHEMA", "INVALID_KIND"},
+                {validJson().replace("[2,3,5]", "[999]"), "REFERENCES", "UNKNOWN_OR_DUPLICATE_REFERENCE"},
+                {validJson().replace("This may be a simulated failure.", "The PostgreSQL connection may have failed."),
+                        "HYPOTHESIS_EVIDENCE", "UNSUPPORTED_DATABASE_ATTRIBUTION"},
+                {validJson().replace("The step may intentionally fail; no outage is established.",
+                        "The database may be unavailable."), "CAUSE_EVIDENCE", "UNSUPPORTED_DATABASE_ATTRIBUTION"}
+        };
+        for (String[] testCase : cases) {
+            appender.list.clear();
+            when(client.converse(any(ConverseRequest.class))).thenReturn(response(testCase[0]));
+            var result = analyze(LOGS);
+            assertEquals("BEDROCK_INVALID_RESPONSE", result.fallbackReason());
+            assertEquals(javaAnalyzer.analyze(LOGS).diagnosticFindings(), result.diagnosticFindings());
+            String message = appender.list.getFirst().getFormattedMessage();
+            assertTrue(message.contains("stage=" + testCase[1]), message);
+            assertTrue(message.contains("reason=" + testCase[2]), message);
+            assertTrue(message.contains("workflowRunId=39549084142"));
+            assertTrue(message.contains("jobId=7"));
+            assertFalse(message.contains("private-"));
+            assertFalse(message.contains("PostgreSQL"));
+            assertFalse(message.contains("may be unavailable"));
+            assertNull(appender.list.getFirst().getThrowableProxy());
+        }
+    }
+
+    @Test
+    void multipleTextBlocksDoNotBypassJsonOrEvidenceValidation() {
+        for (String suffix : List.of("{}", " private-extra-prose")) {
+            when(client.converse(any(ConverseRequest.class))).thenReturn(response(validJson()).toBuilder()
+                    .output(ConverseOutput.fromMessage(Message.builder().role(ConversationRole.ASSISTANT)
+                            .content(ContentBlock.fromText(validJson()), ContentBlock.fromText(suffix)).build()))
+                    .build());
+            assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+        }
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(validJson()).toBuilder()
+                .output(ConverseOutput.fromMessage(Message.builder().role(ConversationRole.ASSISTANT)
+                        .content(ContentBlock.fromText(validJson().replace("[2,3,5]", "[999]")),
+                                ContentBlock.fromText(" ")).build())).build());
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+        assertTrue(appender.list.getLast().getFormattedMessage().contains("stage=REFERENCES"));
+    }
+
+    @Test
+    void fencedJsonWithDatabaseLanguageStillFailsEvidenceChecksRatherThanFormattingChecks() {
+        String json = validJson().replace("This may be a simulated failure.",
+                "A real PostgreSQL connection failure is not established.");
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response("```json\n" + json + "\n```"));
+        assertEquals("BEDROCK_INVALID_RESPONSE", analyze(LOGS).fallbackReason());
+        String message = appender.list.getFirst().getFormattedMessage();
+        assertTrue(message.contains("stage=HYPOTHESIS_EVIDENCE"));
+        assertTrue(message.contains("reason=UNSUPPORTED_DATABASE_ATTRIBUTION"));
+        assertTrue(message.contains("findingIndex=1"));
+        assertFalse(message.contains("PostgreSQL"));
+    }
+
+    @Test
+    void acceptsTheCombinedTextLimitAndIgnoresConverseUsageAndMetricsForApplicationSchema() {
+        String json = validJson();
+        var output = Message.builder().role(ConversationRole.ASSISTANT).content(
+                ContentBlock.fromText(json), ContentBlock.fromText(" ".repeat(16000 - json.length()))).build();
+        when(client.converse(any(ConverseRequest.class))).thenReturn(response(json).toBuilder()
+                .output(ConverseOutput.fromMessage(output))
+                .usage(TokenUsage.builder().inputTokens(900).outputTokens(180).totalTokens(1080).build())
+                .metrics(ConverseMetrics.builder().latencyMs(1234L).build()).build());
+        var result = analyze(LOGS);
+        assertEquals("BEDROCK", result.analysisSource());
+        assertNull(result.fallbackReason());
+        verify(client, times(1)).converse(any(ConverseRequest.class));
+    }
+
+    @Test
+    void logsActionableSsoDiagnosticsWithoutMessagesTokensOrStackTraces() {
+        when(client.converse(any(ConverseRequest.class))).thenThrow(
+                SdkClientException.create("Unable to load SSO token: private-access-token",
+                        new IllegalStateException("Token is expired: test-secret-token")));
+        var baseline = javaAnalyzer.analyze(LOGS);
+        var result = analyze(LOGS);
+        assertEquals("BEDROCK_UNAVAILABLE", result.fallbackReason());
+        assertEquals("JAVA", result.analysisSource());
+        assertEquals(baseline.diagnosticFindings(), result.diagnosticFindings());
+        assertEquals(baseline.fingerprint(), result.fingerprint());
+        assertNull(result.modelIdentifier());
+        assertEquals(1, appender.list.size());
+        String message = appender.list.getFirst().getFormattedMessage();
+        assertTrue(message.contains("workflowRunId=39549084142"));
+        assertTrue(message.contains("jobId=7"));
+        assertTrue(message.contains("model=test-model"));
+        assertTrue(message.contains("region=us-west-2"));
+        assertTrue(message.contains("credentialProfile=test-profile"));
+        assertTrue(message.contains("reason=CREDENTIALS_EXPIRED"));
+        assertTrue(message.contains("causeTypes=[SdkClientException, IllegalStateException]"));
+        assertTrue(message.contains("Refresh the selected AWS profile on the host"));
+        assertFalse(message.contains("private-access-token"));
+        assertFalse(message.contains("test-secret-token"));
+        assertNull(appender.list.getFirst().getThrowableProxy());
+        verify(client, times(1)).converse(any(ConverseRequest.class));
+        verifyNoInteractions(github);
+    }
+
+    @Test
+    void logsAwsFailureCodeStatusAndRequestIdWithoutUpstreamBody() {
+        when(client.converse(any(ConverseRequest.class))).thenThrow(BedrockRuntimeException.builder()
+                .message("private-response-marker test-secret-token")
+                .awsErrorDetails(AwsErrorDetails.builder().errorCode("AccessDeniedException")
+                        .serviceName("BedrockRuntime").errorMessage("private-prompt-marker").build())
+                .statusCode(403).requestId("request-123").build());
+        assertEquals("BEDROCK_UNAVAILABLE", analyze(LOGS).fallbackReason());
+        String message = appender.list.getFirst().getFormattedMessage();
+        assertTrue(message.contains("reason=ACCESS_DENIED"));
+        assertTrue(message.contains("awsErrorCode=AccessDeniedException"));
+        assertTrue(message.contains("httpStatus=403"));
+        assertTrue(message.contains("requestId=request-123"));
+        assertTrue(message.contains("bedrock:InvokeModel"));
+        assertFalse(message.contains("private-response-marker"));
+        assertFalse(message.contains("private-prompt-marker"));
+        assertFalse(message.contains("test-secret-token"));
+        assertNull(appender.list.getFirst().getThrowableProxy());
+    }
+
+    @Test
+    void redactsConfiguredSecretsFromDiagnosticMetadataAndRejectsLogInjection() {
+        analyzer = new ContextualFailureAnalyzer(
+                new org.springframework.beans.factory.support.StaticListableBeanFactory(
+                        java.util.Map.of("client", client)).getBeanProvider(BedrockRuntimeClient.class),
+                JsonMapper.builder().build(), redactor, github, "test-secret-token", false,
+                "us-west-2\nprivate-injected-line", "test-profile");
+        when(client.converse(any(ConverseRequest.class))).thenThrow(BedrockRuntimeException.builder()
+                .awsErrorDetails(AwsErrorDetails.builder().errorCode("test-secret-token")
+                        .serviceName("private injected service\nnew line").build())
+                .requestId("test-secret-token").build());
+        assertEquals("BEDROCK_UNAVAILABLE", analyze(LOGS).fallbackReason());
+        String message = appender.list.getFirst().getFormattedMessage();
+        assertTrue(message.contains("model=UNAVAILABLE"));
+        assertTrue(message.contains("region=UNAVAILABLE"));
+        assertFalse(message.contains("test-secret-token"));
+        assertFalse(message.contains("private-injected-line"));
+        assertFalse(message.contains("private injected service"));
+        assertFalse(message.contains("\n"));
     }
 
     @Test

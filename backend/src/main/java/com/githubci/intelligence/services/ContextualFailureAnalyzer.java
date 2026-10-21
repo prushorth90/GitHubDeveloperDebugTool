@@ -42,6 +42,22 @@ import tools.jackson.databind.DeserializationFeature;
 
 @Service
 public class ContextualFailureAnalyzer {
+    private enum ValidationStage { REQUEST, ENVELOPE, JSON, SCHEMA, REFERENCES, HYPOTHESIS_EVIDENCE, CAUSE_EVIDENCE }
+    private enum Rejection {
+        INCOMPLETE_RESPONSE, NON_TEXT_CONTENT, RESPONSE_SIZE, INVALID_FIELDS, INVALID_TEXT,
+        INVALID_FINDINGS, INVALID_KIND, INVALID_REFERENCES, UNKNOWN_OR_DUPLICATE_REFERENCE,
+        EVIDENCE_SIZE, UNSUPPORTED_DATABASE_ATTRIBUTION
+    }
+
+    private static final class ResponseRejected extends IllegalArgumentException {
+        private final Rejection reason;
+
+        private ResponseRejected(Rejection reason) {
+            super(reason.name());
+            this.reason = reason;
+        }
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ContextualFailureAnalyzer.class);
     private static final Pattern JSON_FENCE = Pattern.compile(
             "\\A```(?:json)?[ \\t]*\\r?\\n(.*)\\r?\\n```\\z", Pattern.DOTALL);
@@ -66,6 +82,10 @@ public class ContextualFailureAnalyzer {
             Database hypotheses require cited, non-printed PostgreSQL client connection diagnostics.
             Without those diagnostics, describe only a possible scripted failure or insufficient
             evidence in suspectedCause and HYPOTHESIS descriptions, without database attribution.
+            For echo/exit-only input, a suitable suspectedCause is "The step may intentionally fail
+            through an explicit shell exit." A suitable hypothesis is "This may be a simulated failure."
+            Cite the supplied command/exit IDs. Do not include database terms in these explanations,
+            even to deny an outage or quote the printed message; literal text belongs in observations.
             If a later step has genuine client exceptions, assess it separately from earlier echoes.
             Missing/truncated command context means uncertainty, not evidence of a connection attempt.
             Commit changes are partial context, not proof of causality. Never disclose secrets.
@@ -88,17 +108,23 @@ public class ContextualFailureAnalyzer {
     private final GitHubService github;
     private final String modelId;
     private final boolean includeChanges;
+    private final String region;
+    private final String profile;
 
     public ContextualFailureAnalyzer(ObjectProvider<BedrockRuntimeClient> clients, ObjectMapper mapper,
             LogRedactionService redactor, GitHubService github,
             @Value("${app.bedrock.model-id:}") String modelId,
-            @Value("${app.bedrock.include-commit-changes:false}") boolean includeChanges) {
+            @Value("${app.bedrock.include-commit-changes:false}") boolean includeChanges,
+            @Value("${app.bedrock.region:}") String region,
+            @Value("${app.bedrock.profile:}") String profile) {
         this.client = clients.getIfAvailable();
         this.mapper = mapper;
         this.redactor = redactor;
         this.github = github;
         this.modelId = modelId;
         this.includeChanges = includeChanges;
+        this.region = region;
+        this.profile = profile;
     }
 
     public FailureAnalysis analyze(String logs, GitHubJob job, String owner, String repo, String sha,
@@ -130,6 +156,10 @@ public class ContextualFailureAnalyzer {
                         "name", limit(redactor.redact(step.name() == null ? "" : step.name()), 300),
                         "conclusion", step.conclusion())).toList());
         input.put("commitChanges", commitChanges(owner, repo, sha, logs));
+        ValidationStage stage = ValidationStage.REQUEST;
+        int findingIndex = -1;
+        String stopReason = "UNAVAILABLE";
+        String requestId = "UNAVAILABLE";
         try {
             ConverseResponse response = client.converse(ConverseRequest.builder().modelId(modelId)
                     .system(SystemContentBlock.builder().text(SYSTEM).build())
@@ -137,52 +167,75 @@ public class ContextualFailureAnalyzer {
                             .content(ContentBlock.fromText(mapper.writeValueAsString(input))).build())
                     .inferenceConfig(InferenceConfiguration.builder().maxTokens(1800).temperature(0F).build())
                     .build());
+            stage = ValidationStage.ENVELOPE;
+            stopReason = response.stopReason() == null ? "UNAVAILABLE" : response.stopReason().name();
+            requestId = response.responseMetadata() == null ? "UNAVAILABLE"
+                    : safeDiagnosticValue(response.responseMetadata().requestId());
             if (response.stopReason() != StopReason.END_TURN || response.output() == null
                     || response.output().message() == null
-                    || response.output().message().content().size() != 1) {
-                throw new IllegalArgumentException("Incomplete or non-text Bedrock response");
+                    || response.output().message().content().isEmpty()) {
+                throw new ResponseRejected(Rejection.INCOMPLETE_RESPONSE);
             }
-            String text = response.output().message().content().getFirst().text();
-            if (text == null || text.length() > 16000) {
-                throw new IllegalArgumentException("Invalid Bedrock response size");
+            StringBuilder content = new StringBuilder();
+            for (ContentBlock block : response.output().message().content()) {
+                if (block.type() != ContentBlock.Type.TEXT || block.text() == null) {
+                    throw new ResponseRejected(Rejection.NON_TEXT_CONTENT);
+                }
+                if (block.text().length() > 16000 - content.length()) {
+                    throw new ResponseRejected(Rejection.RESPONSE_SIZE);
+                }
+                content.append(block.text());
             }
+            String text = content.toString();
+            if (text.isBlank()) throw new ResponseRejected(Rejection.RESPONSE_SIZE);
             var fence = JSON_FENCE.matcher(text.strip());
             String json = fence.matches() ? fence.group(1) : text;
+            stage = ValidationStage.JSON;
             JsonNode root = mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
                     DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY).readTree(json);
+            stage = ValidationStage.SCHEMA;
             exactFields(root, Set.of("suspectedCause", "suggestedInvestigation", "findings"));
             String cause = requiredText(root, "suspectedCause");
             String investigation = requiredText(root, "suggestedInvestigation");
             JsonNode findings = root.get("findings");
             if (!findings.isArray() || findings.isEmpty() || findings.size() > 6) {
-                throw new IllegalArgumentException("Invalid findings");
+                throw new ResponseRejected(Rejection.INVALID_FINDINGS);
             }
             List<DiagnosticFinding> diagnostics = new ArrayList<>();
             for (JsonNode finding : findings) {
-                var kind = DiagnosticFinding.Kind.valueOf(requiredText(finding, "kind"));
+                findingIndex++;
+                stage = ValidationStage.SCHEMA;
+                String kindText = requiredText(finding, "kind");
+                if (!Set.of("OBSERVATION", "HYPOTHESIS").contains(kindText)) {
+                    throw new ResponseRejected(Rejection.INVALID_KIND);
+                }
+                var kind = DiagnosticFinding.Kind.valueOf(kindText);
                 exactFields(finding, kind == DiagnosticFinding.Kind.OBSERVATION
                         ? Set.of("kind", "logLines") : Set.of("kind", "description", "logLines"));
                 JsonNode references = finding.get("logLines");
                 if (!references.isArray() || references.isEmpty() || references.size() > 8) {
-                    throw new IllegalArgumentException("Invalid log references");
+                    throw new ResponseRejected(Rejection.INVALID_REFERENCES);
                 }
+                stage = ValidationStage.REFERENCES;
                 List<LogEvidence> evidence = new ArrayList<>();
                 Set<Integer> identifiers = new HashSet<>();
                 for (JsonNode reference : references) {
                     if (!reference.isIntegralNumber() || !reference.canConvertToInt()
                             || !lines.containsKey(reference.intValue())
                             || !identifiers.add(reference.intValue())) {
-                        throw new IllegalArgumentException("Unknown log line");
+                        throw new ResponseRejected(Rejection.UNKNOWN_OR_DUPLICATE_REFERENCE);
                     }
                     String original = sanitizedLines.get(reference.intValue() - 1);
                     if (original.length() > 2000) {
-                        throw new IllegalArgumentException("Referenced log line exceeds evidence limit");
+                        throw new ResponseRejected(Rejection.EVIDENCE_SIZE);
                     }
                     evidence.add(new LogEvidence(reference.intValue(), original));
                 }
+                stage = ValidationStage.SCHEMA;
                 String description = kind == DiagnosticFinding.Kind.OBSERVATION
                         ? evidence.getFirst().text() : requiredText(finding, "description");
                 if (kind == DiagnosticFinding.Kind.HYPOTHESIS) {
+                    stage = ValidationStage.HYPOTHESIS_EVIDENCE;
                     validateDatabaseAttribution(description, context,
                             evidence.stream().map(LogEvidence::lineNumber).toList());
                 }
@@ -190,17 +243,35 @@ public class ContextualFailureAnalyzer {
                         ? ConfidenceLevel.HIGH : ConfidenceLevel.LOW;
                 diagnostics.add(new DiagnosticFinding(kind, description, confidence, evidence));
             }
+            stage = ValidationStage.CAUSE_EVIDENCE;
+            findingIndex = -1;
             validateDatabaseAttribution(cause, context, diagnostics.stream()
                     .flatMap(finding -> finding.evidence().stream()).map(LogEvidence::lineNumber).distinct().toList());
             return copy(baseline, cause, investigation, "BEDROCK", modelId, diagnostics, null);
         } catch (SdkException exception) {
-            // Never log exception messages or upstream payloads, which may contain input data.
-            log.warn("Bedrock unavailable ({}); using Java analysis", exception.getClass().getSimpleName());
+            var diagnostic = BedrockFailureDiagnostics.from(exception);
+            log.warn("Bedrock unavailable: workflowRunId={}, jobId={}, model={}, region={}, credentialProfile={}, "
+                            + "reason={}, causeTypes={}, awsService={}, awsErrorCode={}, httpStatus={}, requestId={}, "
+                            + "action={}; using Java analysis",
+                    job.runId(), job.id(), safeDiagnosticValue(modelId), safeDiagnosticValue(region),
+                    profile.isBlank() ? "DEFAULT_CHAIN" : safeDiagnosticValue(profile),
+                    diagnostic.reason(), diagnostic.causeTypes(), safeDiagnosticValue(diagnostic.service()),
+                    safeDiagnosticValue(diagnostic.errorCode()), diagnostic.httpStatus(),
+                    safeDiagnosticValue(diagnostic.requestId()), diagnostic.reason().action());
             return fallback(baseline, "BEDROCK_UNAVAILABLE");
         } catch (JacksonException | IllegalArgumentException exception) {
-            log.warn("Bedrock response rejected ({}); using Java analysis", exception.getClass().getSimpleName());
+            String reason = exception instanceof ResponseRejected rejected ? rejected.reason.name()
+                    : exception instanceof JacksonException ? "JSON_DESERIALIZATION" : "INVALID_VALUE";
+            log.warn("Bedrock response rejected: workflowRunId={}, jobId={}, model={}, region={}, stage={}, "
+                            + "reason={}, findingIndex={}, stopReason={}, requestId={}; using Java analysis",
+                    job.runId(), job.id(), safeDiagnosticValue(modelId), safeDiagnosticValue(region),
+                    stage, reason, findingIndex, stopReason, requestId);
             return fallback(baseline, "BEDROCK_INVALID_RESPONSE");
         }
+    }
+
+    private String safeDiagnosticValue(String value) {
+        return BedrockFailureDiagnostics.safeIdentifier(redactor.redact(value));
     }
 
     private Object commitChanges(String owner, String repo, String sha, String logs) {
@@ -288,23 +359,23 @@ public class ContextualFailureAnalyzer {
     private void validateDatabaseAttribution(String text, JobLogContext context, List<Integer> references) {
         if (DATABASE_ATTRIBUTION.matcher(text).find()
                 && !FailureAnalyzerService.hasPostgresConnectionEvidence(context, references)) {
-            throw new IllegalArgumentException("Database attribution lacks cited client connection diagnostics");
+            throw new ResponseRejected(Rejection.UNSUPPORTED_DATABASE_ATTRIBUTION);
         }
     }
 
     private void exactFields(JsonNode node, Set<String> fields) {
         if (node == null || !node.isObject() || !node.propertyNames().equals(fields)) {
-            throw new IllegalArgumentException("Invalid response fields");
+            throw new ResponseRejected(Rejection.INVALID_FIELDS);
         }
     }
 
     private String requiredText(JsonNode node, String field) {
         if (node == null || !node.isObject()) {
-            throw new IllegalArgumentException("Invalid response object");
+            throw new ResponseRejected(Rejection.INVALID_FIELDS);
         }
         JsonNode value = node.get(field);
         if (value == null || !value.isString() || value.asString().isBlank() || value.asString().length() > 1500) {
-            throw new IllegalArgumentException("Invalid text field");
+            throw new ResponseRejected(Rejection.INVALID_TEXT);
         }
         return redactor.redact(value.asString());
     }

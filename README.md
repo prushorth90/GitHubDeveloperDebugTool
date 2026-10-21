@@ -665,6 +665,102 @@ the read-only container cannot persist refreshed SSO tokens. Restart the backend
 after refreshing if necessary. Missing mounts fail startup rather than creating
 empty directories. Plain Compose remains emulator-only by default.
 
+#### Diagnosing a completed analysis with a Bedrock fallback
+
+To identify deployed code rather than cached results, compare the run's
+`analyzedAt` with the container start time. Rebuilding does not reprocess completed
+attempts. `mvn test` compiles classes but does **not** replace an existing packaged
+JAR; use `mvn package` when inspecting the host JAR. The Dockerfile independently
+copies `backend/pom.xml` and `backend/src` and runs Maven `verify`; it never copies
+`backend/target` from the host. Its Dockerfile-specific ignore file includes
+the saved source, including uncommitted edits.
+
+Maven generates `META-INF/build-info.properties`. Startup logs include
+`Backend build identity: artifact=..., version=..., builtAt=...` without exposing
+a new endpoint (the prod profile intentionally exposes only Actuator health).
+Build time identifies the Maven packaging execution, not a Git commit. Use the
+immutable image ID and actual JAR SHA-256 for exact artifact identity:
+
+```sh
+docker inspect github-ci-intelligence-backend-1 \
+  --format 'image={{.Image}} created={{.Created}} started={{.State.StartedAt}}'
+docker compose exec -T backend sha256sum /app/app.jar
+docker compose logs --no-color backend | grep 'Backend build identity'
+```
+
+A restart alone reuses the old image. To rebuild saved source without starting
+the consumer, then explicitly deploy it when ready:
+
+```sh
+docker compose --env-file backend/.env \
+  -f docker-compose.yml -f docker-compose.bedrock.yml build backend
+docker compose --env-file backend/.env \
+  -f docker-compose.yml -f docker-compose.bedrock.yml \
+  up -d --no-deps --force-recreate backend
+```
+
+The first command builds/tests the image without starting the application. The
+second briefly interrupts the backend and resumes the enabled SQS worker, which
+may invoke Bedrock for pending work. Keep existing environment/overlay arguments.
+Neither command deletes database volumes or intentionally regenerates completed
+analyses. Docker's source `COPY` invalidates the Maven build layer when source
+changes; `--no-cache` is not normally necessary.
+
+`COMPLETED` means processing finished and the result was persisted; it does not
+mean Bedrock succeeded. Check each job's `analysisSource`, `modelIdentifier` and
+`fallbackReason`. `BEDROCK_UNAVAILABLE` means the SDK call failed, whereas
+`BEDROCK_INVALID_RESPONSE` means a response failed local schema/evidence checks.
+Response rejections now include a fixed `stage` (`ENVELOPE`, `JSON`, `SCHEMA`,
+`REFERENCES`, `HYPOTHESIS_EVIDENCE`, or `CAUSE_EVIDENCE`), fixed `reason`,
+zero-based `findingIndex` (`-1` outside a finding), stop reason and request ID.
+These diagnostics contain no model text or parser exception messages. Logs from
+older builds that only report `IllegalArgumentException` cannot retrospectively
+identify the rejected field or claim; completed fallback records do not retain
+the rejected model output.
+`UNKNOWN`/LOW classification is expected for the simulated echo/exit workflow
+even when a valid explanation comes from Bedrock.
+
+On SDK failure, backend warnings include the workflow run/job IDs, configured
+model/region/profile, a diagnostic reason and action, a bounded cause-type chain,
+and AWS service/error code, HTTP status and request ID when available. No raw
+exception messages, stack traces, prompts, log excerpts, tokens or response bodies
+are logged. Diagnostic identifiers are bounded and reject unstructured/multiline
+values; configured secrets are also redacted. A reason derived from known SDK
+messages is a troubleshooting category, not proof of IAM permission or model
+availability. An unknown client error remains `SDK_CLIENT_ERROR` rather than an
+invented diagnosis. HTTP status `0`/`UNAVAILABLE` request ID means no AWS response
+metadata was retained, not proof that AWS received the invocation.
+
+For local SSO, an expired cache token is not usable as-is. The SDK may attempt
+OIDC refresh, but this container deliberately cannot persist refreshed tokens to
+the read-only host cache. Do not make credential mounts writable or replace the
+emulators' dummy credentials to work around this. Refresh the session on the
+host, then recreate only the backend with the same environment and overlay:
+
+```sh
+aws sso login --profile prushorthaws
+docker compose --env-file backend/.env \
+  -f docker-compose.yml -f docker-compose.bedrock.yml \
+  up -d --build --no-deps backend
+```
+
+These are manual recovery steps, not an automatic retry. SSO login contacts AWS
+authentication services. Restarting an enabled worker can consume pending work
+and incur Bedrock charges; do this only when ready to allow those invocations.
+For `ACCESS_DENIED`, check `bedrock:InvokeModel`, model access and cross-region
+destination/SCP permissions. For `INVALID_REQUEST` or `MODEL_NOT_FOUND`, check
+the model ID/inference profile, source region and Converse parameters. Do not
+change IAM or the model solely because an opaque `SdkClientException` occurred.
+
+Completed fallback records, including run `39679497413`, remain immutable.
+Neither webhook redelivery nor the analyze endpoint regenerates a completed
+attempt. After authentication is restored, manually dispatch a new workflow
+run or rerun the workflow to create a new attempt; both use separate analysis
+keys. Do not delete completed analysis/ledger records or replay SQS messages to
+force reprocessing. Reanalyzing the same persisted attempt would require a
+separate, explicitly authorized versioned/audited mechanism, which is not
+implemented.
+
 The backend role needs **`bedrock:InvokeModel`** on the chosen foundation model
 or inference profile (Converse has no separate IAM action). Cross-region inference
 profiles also require permission on their destination model resources and regions.
@@ -697,6 +793,12 @@ not a shell interpreter or a guarantee that arbitrary output is genuine.
 
 Responses must be one JSON object, optionally enclosed in a single whole-response
 Markdown fence (bare or `json`, with opening/closing fences on their own lines).
+The AWS SDK deserializes the Converse envelope; this code reads
+`output.message.content`, not the native InvokeModel response body. Consecutive
+text blocks are concatenated in order under a combined 16,000-character limit
+before validating the single JSON object. Non-text blocks and non-`end_turn`
+completion (including `max_tokens`) still cause fallback. Splitting output into
+multiple blocks does not permit extra JSON objects, prose or invalid references.
 Surrounding whitespace is allowed, but prose outside the JSON/fence, duplicate
 object keys, multiple objects, malformed JSON and other fence languages are rejected.
 The model-only contract is defined in

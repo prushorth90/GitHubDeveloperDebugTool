@@ -1,0 +1,27 @@
+name: Diagnostic Test - PostgreSQL Connectivity
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  postgresql-connectivity:
+    name: Real psql connection to unavailable isolated loopback
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prepare PostgreSQL client image
+        run: docker pull postgres:17.6-bookworm
+      - name: Attempt a real connection with no PostgreSQL server
+        shell: bash
+        run: |
+          docker run --rm --network none \
+            --env PGCONNECT_TIMEOUT=3 \
+            --env PGPASSFILE=/dev/null \
+            --env PGSSLMODE=disable \
+            --entrypoint psql \
+            postgres:17.6-bookworm \
+            --no-password --host=127.0.0.1 --port=65432 \
+            --username=diagnostic --dbname=diagnostic \
+            --command='SELECT 1;'

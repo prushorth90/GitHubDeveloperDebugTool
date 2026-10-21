@@ -243,7 +243,7 @@ class WorkflowAnalysisRepositoryIT {
         beans.addBean("bedrock", bedrock);
         var analyzer = new ContextualFailureAnalyzer(beans.getBeanProvider(BedrockRuntimeClient.class),
                 JsonMapper.builder().build(), new LogRedactionService("", ""), mock(GitHubService.class),
-                "mock-model", false);
+                "mock-model", false, "us-west-2", "test-profile");
         var explanation = analyzer.analyze(logs, failedJob.job(), "octo", "demo", null, javaAnalysis);
         var enriched = new WorkflowRunAnalysis(base.repository(), base.runId(), List.of(
                 new FailedJobAnalysis(failedJob.job(), failedJob.logStatus(), failedJob.logMessage(),
