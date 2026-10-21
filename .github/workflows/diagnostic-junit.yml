@@ -10,8 +10,6 @@ jobs:
     name: Real JUnit assertion with unequal expected and actual values
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      DIAGNOSTIC_DIR: ${{ runner.temp }}/diagnostic-junit
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -20,6 +18,7 @@ jobs:
       - name: Prepare isolated JUnit project
         shell: bash
         run: |
+          DIAGNOSTIC_DIR="$RUNNER_TEMP/diagnostic-junit"
           mkdir -p "$DIAGNOSTIC_DIR/src/test/java/diagnostic"
           cat > "$DIAGNOSTIC_DIR/pom.xml" <<'XML'
           <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -71,8 +70,12 @@ jobs:
           }
           JAVA
       - name: Compile the isolated test before executing it
-        working-directory: ${{ env.DIAGNOSTIC_DIR }}
-        run: mvn --batch-mode --no-transfer-progress -Dstyle.color=never test-compile
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/diagnostic-junit"
+          mvn --batch-mode --no-transfer-progress -Dstyle.color=never test-compile
       - name: Execute the real failing JUnit assertion
-        working-directory: ${{ env.DIAGNOSTIC_DIR }}
-        run: mvn --batch-mode --no-transfer-progress -Dstyle.color=never test
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/diagnostic-junit"
+          mvn --batch-mode --no-transfer-progress -Dstyle.color=never test

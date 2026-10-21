@@ -10,8 +10,6 @@ jobs:
     name: Real javac failure from an undefined Java symbol
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      DIAGNOSTIC_DIR: ${{ runner.temp }}/diagnostic-java-compilation
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -20,6 +18,7 @@ jobs:
       - name: Prepare isolated invalid Java source
         shell: bash
         run: |
+          DIAGNOSTIC_DIR="$RUNNER_TEMP/diagnostic-java-compilation"
           mkdir -p "$DIAGNOSTIC_DIR"
           cat > "$DIAGNOSTIC_DIR/DiagnosticCompilation.java" <<'JAVA'
           public class DiagnosticCompilation {
@@ -30,4 +29,4 @@ jobs:
           JAVA
       - name: Compile invalid source with javac
         shell: bash
-        run: javac -J-Duser.language=en -J-Duser.country=US "$DIAGNOSTIC_DIR/DiagnosticCompilation.java"
+        run: javac -J-Duser.language=en -J-Duser.country=US "$RUNNER_TEMP/diagnostic-java-compilation/DiagnosticCompilation.java"

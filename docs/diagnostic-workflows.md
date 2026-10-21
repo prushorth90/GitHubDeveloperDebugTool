@@ -26,6 +26,11 @@ test username is not a credential for any real database. A short connect timeout
 and `--no-password` prevent an interactive wait.
 
 Java and JUnit source are generated only under the runner's temporary directory.
+Paths use the runner-provided `RUNNER_TEMP` environment variable inside Bash
+steps. The `runner` expression context is not available in job-level `env`;
+these workflows avoid that expression context entirely. Each execution step
+resolves its own temporary path rather than relying on shell variables surviving
+between steps.
 The JUnit workflow uses one test dependency (`junit-jupiter`) and pinned compiler
 and Surefire plugins; Maven downloads their normal transitive artifacts. It
 does not need Spring Boot, Docker services, or a production application build.
