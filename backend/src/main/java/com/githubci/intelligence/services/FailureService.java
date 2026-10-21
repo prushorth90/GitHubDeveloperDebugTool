@@ -1,6 +1,7 @@
 package com.githubci.intelligence.services;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.EnumMap;
 import java.util.List;
@@ -97,6 +98,8 @@ public class FailureService {
             var repo = requireRepository(repositoryId);
             long total = 0, completed = 0, processing = 0, failed = 0, failures = 0, unavailable = 0;
             var categories = new EnumMap<FailureCategory, Long>(FailureCategory.class);
+            Run latestRun = null;
+            Instant lastAnalyzedAt = null;
             for (FailureCategory category : FailureCategory.values()) {
                 categories.put(category, 0L);
             }
@@ -104,6 +107,13 @@ public class FailureService {
             do {
                 var page = repository.runs(repo.fullName(), false, false, 100, start);
                 for (var record : page.items()) {
+                    if (latestRun == null) {
+                        latestRun = runDto(record);
+                    }
+                    if (record.status() == AnalysisStatus.COMPLETED && record.updatedAt() != null
+                            && (lastAnalyzedAt == null || record.updatedAt().isAfter(lastAnalyzedAt))) {
+                        lastAnalyzedAt = record.updatedAt();
+                    }
                     total++;
                     switch (record.status()) {
                         case PROCESSING -> processing++;
@@ -126,7 +136,8 @@ public class FailureService {
                 }
                 start = page.nextKey();
             } while (!start.isEmpty());
-            return new Statistics(total, completed, processing, failed, failures, unavailable, categories);
+            return new Statistics(total, completed, processing, failed, failures, unavailable, categories,
+                    latestRun, lastAnalyzedAt);
         });
     }
 

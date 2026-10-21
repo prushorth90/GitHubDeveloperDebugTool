@@ -163,6 +163,46 @@ class FailureServiceTest {
         assertEquals(1, stats.unavailableJobAnalyses());
         assertEquals(1, stats.failuresByCategory().get(JAVA_COMPILATION));
         assertEquals(0, stats.failuresByCategory().get(JUNIT_TEST));
+        assertEquals(42, stats.latestRun().runId());
+        assertEquals(NOW, stats.lastAnalyzedAt());
+    }
+
+    @Test
+    void findsLastAnalysisAcrossAllPagesEvenWhenLatestWorkflowIsStillProcessing() {
+        var key = Map.of("pk", value("REPO#octo/demo"), "sk", value("run"), "runSk", value("time"));
+        var completed = record(41, AnalysisStatus.COMPLETED, true);
+        var laterAnalysis = NOW.plusSeconds(300);
+        when(repository.runs(REPO.fullName(), false, false, 100, Map.of()))
+                .thenReturn(new ReadPage<>(List.of(record(43, AnalysisStatus.PROCESSING, false),
+                        record(42, AnalysisStatus.COMPLETED, true)), key));
+        when(repository.runs(REPO.fullName(), false, false, 100, key))
+                .thenReturn(new ReadPage<>(List.of(new StoredWorkflowAnalysis(
+                        completed.repository(), completed.workflowRun(), completed.status(), completed.analysis(),
+                        completed.createdAt(), laterAnalysis, null)), Map.of()));
+        var stats = service.statistics(1);
+        assertEquals(43, stats.latestRun().runId());
+        assertEquals(AnalysisStatus.PROCESSING, stats.latestRun().analysisStatus());
+        assertNull(stats.latestRun().analyzedAt());
+        assertEquals(laterAnalysis, stats.lastAnalyzedAt());
+    }
+
+    @Test
+    void emptyRepositoryHasNoLatestRunOrAnalysisTime() {
+        when(repository.runs(REPO.fullName(), false, false, 100, Map.of()))
+                .thenReturn(new ReadPage<>(List.of(), Map.of()));
+        var stats = service.statistics(1);
+        assertEquals(0, stats.totalRuns());
+        assertNull(stats.latestRun());
+        assertNull(stats.lastAnalyzedAt());
+    }
+
+    @Test
+    void failedAnalysisDoesNotCountAsLastAnalyzed() {
+        when(repository.runs(REPO.fullName(), false, false, 100, Map.of()))
+                .thenReturn(new ReadPage<>(List.of(record(42, AnalysisStatus.FAILED, false)), Map.of()));
+        var stats = service.statistics(1);
+        assertEquals(42, stats.latestRun().runId());
+        assertNull(stats.lastAnalyzedAt());
     }
 
     @ParameterizedTest

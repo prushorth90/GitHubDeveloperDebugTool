@@ -486,8 +486,8 @@ sensitive; callers must not log it.
 
 **Access control:** these endpoints use the server's token and do not authenticate
 callers. Keep the backend private or protect it with an authenticated gateway
-before exposing it to other users. CORS is not authorization. The frontend's
-sample-data pages are not yet connected to these endpoints.
+before exposing it to other users. CORS is not authorization. The frontend
+overview reads the persisted analysis API, not these live GitHub endpoints.
 
 Mocked HTTP tests cover pagination, DTO mapping, endpoint wiring, error responses,
 rate limits, unavailable logs, bounded downloads, and safe redirects without
@@ -553,7 +553,8 @@ by `logObjectKey`. See [persistence limits and access patterns](docs/dynamodb.md
 returns an immutable `FailureAnalysis` record. It is a Spring service but can also
 be constructed directly with `new FailureAnalyzerService()`; no Spring context,
 GitHub token, AWS credentials, network requests or paid AI APIs are required.
-It is used by the analysis endpoint but is not yet connected to the dashboard.
+It is used by the analysis endpoint; persisted counts appear in the repository
+dashboard, but detailed failure inspection still uses labeled sample data.
 
 The result contains:
 
@@ -649,8 +650,25 @@ npm run dev
 
 Open `http://localhost:5173` for the responsive developer dashboard. The sidebar
 links to Overview, Repositories, Workflow Failures, Analytics, and Settings.
-Repository search, failure filtering, and chart period selectors operate on
-explicitly labeled sample data; no GitHub connection is required.
+Overview and Repositories use the persisted Spring Boot REST API. Responsive
+cards display workflow-attempt totals, analyzed failed runs, the latest workflow
+conclusion and the last completed analysis timestamp. Repository selection and
+search filter locally; clearing the selection displays all loaded repositories.
+Discovery loads 12 repositories at a time using an explicit Load more button.
+Repositories appear after a workflow analysis is persisted; an empty catalog
+shows setup guidance rather than sample metrics.
+
+The shared Axios service and typed TanStack Query hooks are separate from the
+presentation components. Both routes share a five-minute cache (retained for
+30 minutes), with one statistics request per visible repository. There is no
+repository polling, automatic retry, window-focus or reconnect refetch. Refresh
+reloads the loaded discovery pages and visible statistics, while failed cards
+offer individual retries. Errors preserve previously loaded data, never fake
+zero counts. Requests accept cancellation signals. The statistics endpoint
+reads all persisted attempts; large histories should use maintained backend
+aggregates before reducing the cache duration. See [API semantics](docs/analysis-api.md).
+
+Workflow Failures and Analytics still use explicitly labeled sample data.
 
 The backend health indicator calls `GET /api/health` using a shared Axios client
 and TanStack Query. It shows checking, connected (`status: "UP"`), non-UP, invalid
@@ -794,10 +812,12 @@ docker compose config --quiet
 The root npm build compiles the frontend and infrastructure, **not** the Maven
 backend. GitHub Actions runs independent backend verification, frontend build,
 and CDK synthesis jobs on pushes and pull requests. The frontend can also be smoke-tested in a browser: navigate all five routes,
-filter sample repositories and failures, resize to mobile and use the navigation
+filter repositories and sample failures, resize to mobile and use the navigation
 drawer, and verify health checking with the backend both running and stopped.
 Health responses can be intercepted to verify non-UP and malformed payloads.
-No automated frontend test framework is configured yet.
+Run `npm test --workspace frontend` for Vitest/React Testing Library coverage
+of repository loading, selection/search, cache reuse and request counts, explicit
+pagination, refresh, partial errors, retries and empty states.
 
 Keep credentials out of source control. Local `.env` files and CDK context are
 ignored. The frontend's optional public API URL is documented above; no secrets

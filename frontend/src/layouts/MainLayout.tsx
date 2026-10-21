@@ -37,7 +37,6 @@ export default function MainLayout() {
             sx={{ borderRadius: 2, mb: 0.75, minHeight: 44, px: 1.5, color: '#737b8e', '&.active': { bgcolor: '#eee8fc', color: 'primary.main', '& .MuiListItemIcon-root': { color: 'primary.main' }, '& .MuiListItemText-primary': { fontWeight: 650 } } }}>
             <ListItemIcon sx={{ minWidth: 33, color: 'inherit' }}><Icon sx={{ fontSize: 20 }} /></ListItemIcon>
             <ListItemText primary={label} slotProps={{ primary: { sx: { fontSize: 12.5 } } }} />
-            {label === 'Workflow Failures' && <Box sx={{ bgcolor: '#fcebed', color: '#cf6370', borderRadius: 1, px: 0.75, fontSize: 10, fontWeight: 600 }}>5</Box>}
           </ListItemButton>
         ))}
       </List>

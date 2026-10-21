@@ -115,6 +115,15 @@ table scan) and are not a transactionally consistent snapshot. Their latency and
 read cost grow with repository history; large deployments should introduce
 maintained aggregates before using statistics on a high-frequency dashboard.
 
+Statistics also include `latestRun` (the same run-summary DTO as `/runs`, or
+null for an empty repository) and `lastAnalyzedAt` (the maximum completion
+timestamp across completed analyses, or null if none have completed). The latest
+run follows workflow creation chronology and can still be processing or failed;
+its `analyzedAt` is not necessarily the repository's `lastAnalyzedAt`. Both fields
+are computed during the existing statistics traversal with no additional reads.
+The dashboard fetches statistics only for visible repositories, caches them for
+five minutes, and refreshes only on explicit user action or a stale mount.
+
 ## Deployment and existing data
 
 Provision the read schema and backfill existing analyses **before** enabling

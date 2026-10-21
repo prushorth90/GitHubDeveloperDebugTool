@@ -26,7 +26,7 @@ public final class FailureResponses {
     }
     public record Statistics(long totalRuns, long completedAnalyses, long processingAnalyses,
                              long failedAnalyses, long failureRuns, long unavailableJobAnalyses,
-                             Map<FailureCategory, Long> failuresByCategory) {
+                             Map<FailureCategory, Long> failuresByCategory, Run latestRun, Instant lastAnalyzedAt) {
         public Statistics { failuresByCategory = Map.copyOf(failuresByCategory); }
     }
 }

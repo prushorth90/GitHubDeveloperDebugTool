@@ -29,6 +29,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci --workspace frontend
+      - name: Test frontend
+        run: npm test --workspace frontend
       - name: Build and type-check frontend
         run: npm run build --workspace frontend
 

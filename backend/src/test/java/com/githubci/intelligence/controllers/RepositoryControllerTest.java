@@ -72,9 +72,11 @@ class RepositoryControllerTest {
 
     @Test
     void retrievesStatisticsInStandardEnvelope() throws Exception {
-        when(service.statistics(1)).thenReturn(new Statistics(2, 1, 1, 0, 1, 0, Map.of(JAVA_COMPILATION, 1L)));
+        when(service.statistics(1)).thenReturn(new Statistics(2, 1, 1, 0, 1, 0, Map.of(JAVA_COMPILATION, 1L), null, null));
         mvc.perform(get("/api/repositories/1/statistics")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.totalRuns").value(2))
+                .andExpect(jsonPath("$.data.latestRun").isEmpty())
+                .andExpect(jsonPath("$.data.lastAnalyzedAt").isEmpty())
                 .andExpect(jsonPath("$.data.failuresByCategory.JAVA_COMPILATION").value(1));
     }
 
