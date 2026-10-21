@@ -20,6 +20,11 @@ management:
       show-details: never
 
 app:
+  bedrock:
+    enabled: ${BEDROCK_ENABLED:false}
+    region: ${BEDROCK_REGION:${AWS_REGION:us-east-1}}
+    model-id: ${BEDROCK_MODEL_ID:}
+    include-commit-changes: ${BEDROCK_INCLUDE_COMMIT_CHANGES:false}
   sqs:
     endpoint: ${SQS_ENDPOINT:}
     region: ${AWS_REGION:us-east-1}

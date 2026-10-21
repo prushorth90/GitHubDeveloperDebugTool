@@ -1,7 +1,7 @@
 import { AxiosError, AxiosHeaders } from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
-import { getRepositories, getRepositoryStatistics, getWorkflowAnalytics, repositoryErrorMessage } from './repositories';
+import { getRepositories, getRepositoryFailures, getRepositoryStatistics, getWorkflowAnalytics, getWorkflowFailure, repositoryErrorMessage } from './repositories';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -28,12 +28,34 @@ describe('repository API client', () => {
     expect(get).toHaveBeenCalledExactlyOnceWith('/api/repositories/42/statistics', { signal });
   });
 
+  it('requests persisted failure pages and the exact run attempt with cancellation', async () => {
+    const page = { items: [], nextToken: 'opaque-cursor' };
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ data: { data: page } });
+    const signal = new AbortController().signal;
+    expect(await getRepositoryFailures(42, null, signal)).toBe(page);
+    expect(get).toHaveBeenLastCalledWith('/api/repositories/42/failures', {
+      params: { limit: 20, nextToken: undefined }, signal,
+    });
+    await getRepositoryFailures(42, page.nextToken, signal);
+    expect(get).toHaveBeenLastCalledWith('/api/repositories/42/failures', {
+      params: { limit: 20, nextToken: page.nextToken }, signal,
+    });
+    const failure = { run: { runId: 99, attempt: 2 }, failedJobs: [] };
+    get.mockResolvedValue({ data: { data: failure } });
+    expect(await getWorkflowFailure(42, 99, 2, signal)).toBe(failure);
+    expect(get).toHaveBeenLastCalledWith('/api/repositories/42/failures/99', {
+      params: { attempt: 2 }, signal,
+    });
+  });
+
   it('propagates API failures rather than returning success-shaped defaults', async () => {
     const error = new Error('Unavailable');
     vi.spyOn(api, 'get').mockRejectedValue(error);
     await expect(getRepositories(null)).rejects.toBe(error);
     await expect(getRepositoryStatistics(1)).rejects.toBe(error);
     await expect(getWorkflowAnalytics(1, 7)).rejects.toBe(error);
+    await expect(getRepositoryFailures(1, null)).rejects.toBe(error);
+    await expect(getWorkflowFailure(1, 99, 2)).rejects.toBe(error);
   });
 
   it('requests bounded aggregates with the selected window and cancellation signal', async () => {

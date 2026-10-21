@@ -59,6 +59,33 @@ export interface RepositoryStatistics {
   lastAnalyzedAt: string | null;
 }
 
+export interface WorkflowFailure {
+  run: WorkflowRun;
+  failedJobs: {
+    jobId: number;
+    name: string;
+    logStatus: 'AVAILABLE' | 'UNAVAILABLE';
+    logMessage: string | null;
+    analysis: {
+      category: FailureCategory;
+      errorMessage: string;
+      suspectedCause: string;
+      suggestedInvestigation: string;
+      confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+      analysisSource?: 'JAVA' | 'LEGACY_JAVA' | 'BEDROCK';
+      modelIdentifier?: string | null;
+      fallbackReason?: string | null;
+      diagnosticFindings?: {
+        kind: 'OBSERVATION' | 'HYPOTHESIS';
+        description: string;
+        confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+        evidence: { lineNumber: number; text: string }[];
+      }[];
+      evidence: { lineNumber: number; text: string }[];
+    } | null;
+  }[];
+}
+
 export interface WorkflowAnalytics {
   from: string;
   until: string;

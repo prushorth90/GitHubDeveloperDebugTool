@@ -59,7 +59,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = {"spring.profiles.active=local", "github.token="})
+@SpringBootTest(properties = {"spring.profiles.active=local", "github.token=", "app.bedrock.enabled=false"})
 @Import(WorkflowRunAnalysisIntegrationTest.MockGitHubConfiguration.class)
 class WorkflowRunAnalysisIntegrationTest {
 
@@ -129,6 +129,9 @@ class WorkflowRunAnalysisIntegrationTest {
                 .andExpect(jsonPath("$.failedJobs[0].analysis.errorMessage").value(COMPILER_ERROR))
                 .andExpect(jsonPath("$.failedJobs[0].analysis.category").value("JAVA_COMPILATION"))
                 .andExpect(jsonPath("$.failedJobs[0].analysis.confidence").value("HIGH"))
+                .andExpect(jsonPath("$.failedJobs[0].analysis.analysisSource").value("JAVA"))
+                .andExpect(jsonPath("$.failedJobs[0].analysis.diagnosticFindings[0].kind").value("OBSERVATION"))
+                .andExpect(jsonPath("$.failedJobs[0].analysis.diagnosticFindings[1].confidence").value("LOW"))
                 .andExpect(jsonPath("$.failedJobs[0].analysis.evidence[0].text").value(COMPILER_ERROR))
                 .andExpect(jsonPath("$.failedJobs[0].analysis.normalizedSignature").value(COMPILER_ERROR))
                 .andExpect(jsonPath("$.failedJobs[0].analysis.fingerprint").value(matchesPattern("[0-9a-f]{64}")))

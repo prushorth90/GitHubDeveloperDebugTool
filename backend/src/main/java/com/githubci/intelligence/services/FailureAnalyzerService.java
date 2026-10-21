@@ -41,6 +41,8 @@ public class FailureAnalyzerService {
     }
 
     private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-?]*[ -/]*[@-~]");
+    private static final Pattern ECHO = pattern(
+            "\\b(?:echo|printf)\\s+(?:-[a-z]+\\s+)?(?:\"([^\"\\r\\n]*)\"|'([^'\\r\\n]*)'|([^\\r\\n;&|]+))");
     private static final Pattern TIMESTAMP = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z\\s*");
     private static final Pattern GENERIC_ERROR = pattern(
@@ -75,7 +77,7 @@ public class FailureAnalyzerService {
                     "The workflow or an action reference may be invalid.",
                     "Validate the workflow YAML, expressions, action paths and referenced versions."),
             rule(POSTGRESQL_CONNECTION, HIGH,
-                    "(?:org\\.postgresql\\..*|psql:.*|postgres(?:ql)?.*)"
+                    "(?:org\\.postgresql\\..*|psql:.*)"
                             + "(?:connection.*(?:refused|failed|timed out)|could not connect|"
                             + "password authentication failed|no pg_hba\\.conf entry|"
                             + "too many clients|remaining connection slots)",
@@ -146,16 +148,24 @@ public class FailureAnalyzerService {
                 .map(line -> TIMESTAMP.matcher(ANSI.matcher(line).replaceAll("")).replaceFirst("").strip())
                 .toList();
         Map<FailureCategory, Match> matches = new EnumMap<>(FailureCategory.class);
+        List<String> printedMessages = lines.stream().flatMap(line -> ECHO.matcher(line).results())
+                .map(result -> {
+                    String message = result.group(1) != null ? result.group(1)
+                            : result.group(2) != null ? result.group(2) : result.group(3);
+                    return message.replace("\\n", "").strip();
+                }).toList();
+        List<String> diagnosticLines = lines.stream()
+                .map(line -> ECHO.matcher(line).find() || printedMessages.contains(line) ? "" : line).toList();
         int firstError = -1;
         for (int index = 0; index < lines.size(); index++) {
             String line = lines.get(index);
             if (BOUNDARY.matcher(line).find()) {
                 continue;
             }
-            if (firstError < 0 && GENERIC_ERROR.matcher(line).find()) {
+            if (firstError < 0 && !ECHO.matcher(line).find() && GENERIC_ERROR.matcher(line).find()) {
                 firstError = index;
             }
-            Match match = match(lines, index);
+            Match match = match(diagnosticLines, index);
             if (match != null) {
                 Match previous = matches.get(match.rule().category());
                 if (previous == null || match.rule().confidence().compareTo(previous.rule().confidence()) > 0) {
@@ -186,7 +196,11 @@ public class FailureAnalyzerService {
         List<Integer> indices = firstError < 0 ? List.of() : List.of(firstError);
         return analysis(UNKNOWN,
                 firstError < 0 ? "No recognizable failure diagnostic found." : lines.get(firstError),
-                "The available log evidence does not establish a supported failure category.",
+                printedMessages.isEmpty()
+                        ? "The available log evidence does not establish a supported failure category."
+                        : "The available evidence does not establish a supported failure category. "
+                                + "The logs contain echoed or printed messages. These do not demonstrate a real connection "
+                                + "attempt or database outage; the underlying cause is unverified.",
                 "Inspect the failed step and preceding output, obtain fuller logs if needed, and verify "
                         + "the actual target of any network error before attributing it to a database.",
                 LOW, evidence(lines, indices), context(lines, indices));
@@ -216,6 +230,11 @@ public class FailureAnalyzerService {
                 if (POSTGRES_CONNECTION_CONTEXT.matcher(lines.get(nearby)).find()
                         && sameSection(lines, index, nearby)
                         && (nearby == index || !EXPLICIT_NETWORK_TARGET.matcher(line).find())) {
+                    // A product name in prose is not evidence of a client operation.
+                    if (!pattern("jdbc:postgresql:|org\\.postgresql\\.|\\bpsql\\b")
+                            .matcher(lines.get(nearby)).find()) {
+                        continue;
+                    }
                     return new Match(ruleFor(POSTGRESQL_CONNECTION, HIGH), index,
                             index == nearby ? List.of(index) : List.of(Math.min(index, nearby), Math.max(index, nearby)));
                 }

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { api } from './api';
-import type { ApiError, ApiPage, ApiResponse, Repository, RepositoryStatistics, WorkflowAnalytics } from '../types/repositories';
+import type { ApiError, ApiPage, ApiResponse, Repository, RepositoryStatistics, WorkflowAnalytics, WorkflowFailure, WorkflowRun } from '../types/repositories';
 
 export async function getRepositories(nextToken: string | null, signal?: AbortSignal): Promise<ApiPage<Repository>> {
   const { data } = await api.get<ApiResponse<ApiPage<Repository>>>('/api/repositories', {
@@ -12,6 +12,21 @@ export async function getRepositories(nextToken: string | null, signal?: AbortSi
 
 export async function getRepositoryStatistics(id: number, signal?: AbortSignal): Promise<RepositoryStatistics> {
   const { data } = await api.get<ApiResponse<RepositoryStatistics>>(`/api/repositories/${id}/statistics`, { signal });
+  return data.data;
+}
+
+export async function getRepositoryFailures(id: number, nextToken: string | null, signal?: AbortSignal): Promise<ApiPage<WorkflowRun>> {
+  const { data } = await api.get<ApiResponse<ApiPage<WorkflowRun>>>(`/api/repositories/${id}/failures`, {
+    params: { limit: 20, nextToken: nextToken ?? undefined },
+    signal,
+  });
+  return data.data;
+}
+
+export async function getWorkflowFailure(id: number, runId: number, attempt: number, signal?: AbortSignal): Promise<WorkflowFailure> {
+  const { data } = await api.get<ApiResponse<WorkflowFailure>>(`/api/repositories/${id}/failures/${runId}`, {
+    params: { attempt }, signal,
+  });
   return data.data;
 }
 

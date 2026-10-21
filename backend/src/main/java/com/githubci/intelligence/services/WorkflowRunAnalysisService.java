@@ -14,6 +14,7 @@ import com.githubci.intelligence.repositories.WorkflowAnalysisRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import static com.githubci.intelligence.dto.WorkflowRunAnalysis.LogStatus.AVAILABLE;
@@ -29,15 +30,24 @@ public class WorkflowRunAnalysisService {
     private final WorkflowAnalysisRepository repository;
     private final LogStorageService logStorage;
     private final LogRedactionService redactor;
+    private final ContextualFailureAnalyzer contextualAnalyzer;
 
     public WorkflowRunAnalysisService(
             GitHubService github, FailureAnalyzerService analyzer, WorkflowAnalysisRepository repository,
             LogStorageService logStorage, LogRedactionService redactor) {
+        this(github, analyzer, repository, logStorage, redactor, null);
+    }
+
+    @Autowired
+    public WorkflowRunAnalysisService(
+            GitHubService github, FailureAnalyzerService analyzer, WorkflowAnalysisRepository repository,
+            LogStorageService logStorage, LogRedactionService redactor, ContextualFailureAnalyzer contextualAnalyzer) {
         this.github = github;
         this.analyzer = analyzer;
         this.repository = repository;
         this.logStorage = logStorage;
         this.redactor = redactor;
+        this.contextualAnalyzer = contextualAnalyzer;
     }
 
     public WorkflowRunAnalysis analyze(String owner, String repo, long runId) {
@@ -138,6 +148,10 @@ public class WorkflowRunAnalysisService {
         }
         String sanitized = redactor.redact(logs);
         String objectKey = logStorage.upload(run.repository().id(), run.id(), run.runAttempt(), job.id(), sanitized);
-        return new FailedJobAnalysis(job, AVAILABLE, null, analyzer.analyze(sanitized), objectKey);
+        var analysis = analyzer.analyze(sanitized);
+        if (contextualAnalyzer != null) {
+            analysis = contextualAnalyzer.analyze(sanitized, job, owner, repo, run.headSha(), analysis);
+        }
+        return new FailedJobAnalysis(job, AVAILABLE, null, analysis, objectKey);
     }
 }

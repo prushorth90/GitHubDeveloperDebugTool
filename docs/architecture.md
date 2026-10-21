@@ -79,9 +79,18 @@ evidence and surrounding context from suspected causes and investigation advice.
 Specific diagnostics outrank build wrappers; equally strong conflicting categories
 remain unknown. PostgreSQL attribution requires connection-specific supporting
 evidence, not merely a generic network error. Analysis is wired to both the
-synchronous HTTP analysis route and asynchronous webhook worker, but not the frontend.
+synchronous HTTP analysis route and asynchronous webhook worker. The frontend
+reads persisted analyses through the existing detail API.
 See [local failure analysis](../README.md#local-failure-analysis)
 for the categories, confidence semantics and local test command.
+
+`ContextualFailureAnalyzer` optionally uses the AWS SDK v2 Bedrock Converse API.
+It enriches Java diagnoses with validated contextual findings without changing
+category/fingerprint semantics. Sanitized log excerpts, failed-step metadata and
+opt-in relevant head-commit patches are untrusted prompt data. SDK errors and
+invalid model responses retain Java analysis with an explicit fallback reason.
+Observations and LOW-confidence hypotheses have separate supporting log references;
+provenance and findings serialize in the existing DynamoDB analysis payload.
 
 `LogStorageService` stores sanitized UTF-8 gzip logs through AWS SDK for Java v2.
 Keys include repository ID, run ID, attempt and job ID; DynamoDB stores the key
@@ -129,8 +138,10 @@ and payload failures are surfaced, not replaced with demo success.
 The health query polls every 30 seconds and supports manual retries.
 Overview and Repositories share cached persisted catalog/statistics queries.
 Analytics shares the catalog and requests server-side windowed aggregates when
-its repository or period changes. Workflow Failures still uses labeled demo
-fixtures. Vitest and Testing Library cover API clients and dashboard states.
+its repository or period changes. Workflow Failures reads persisted attempts and
+displays classification evidence, Java/Bedrock provenance, model identifier and
+separate observations/hypotheses using Material UI. Vitest and Testing Library
+cover API clients and dashboard states.
 
 ## Infrastructure and operations
 

@@ -67,6 +67,23 @@ curl 'http://localhost:8080/api/repositories/1/failures/42/similar'
 
 ### Detail, incomplete analyses and errors
 
+Failure analysis retains its existing fields and adds `analysisSource` (`JAVA`,
+`BEDROCK`, `LEGACY_JAVA`), nullable `modelIdentifier`, nullable `fallbackReason`,
+and `diagnosticFindings`. Each finding has `kind` (`OBSERVATION` or `HYPOTHESIS`),
+`description`, `confidence` (`LOW`, `MEDIUM`, `HIGH`) and `evidence`
+(`[{lineNumber,text}]`). Line numbers are one-based positions in the sanitized
+job log, not workflow source lines; Bedrock reference text is copied from the
+actual submitted excerpts. Hypotheses have LOW confidence and are unverified.
+The existing top-level confidence rates category evidence, not root-cause certainty.
+Bedrock explanations retain Java categories/fingerprints, so existing filters,
+similarity and analytics semantics remain stable.
+
+These additive fields are stored in the existing DynamoDB analysis JSON.
+Older records deserialize as `LEGACY_JAVA` with no newly invented findings.
+Reading details never generates an explanation or invokes a model. Completed
+attempts are not automatically reanalyzed when the analyzer/configuration changes.
+See [Bedrock configuration and limitations](../README.md#optional-contextual-explanations-with-amazon-bedrock).
+
 Without `attempt`, detail/similar select the latest persisted attempt using a
 strongly consistent table query. An explicit attempt uses a strongly consistent
 point read. If a newer attempt is still processing, the default detail returns

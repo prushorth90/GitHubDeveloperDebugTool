@@ -46,7 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = {"github.webhook-secret=unit-test-webhook-secret", "github.token="})
+@SpringBootTest(properties = {"github.webhook-secret=unit-test-webhook-secret", "github.token=", "app.bedrock.enabled=false"})
 class GitHubWebhookControllerTest {
 
     private static final String SECRET = "unit-test-webhook-secret";

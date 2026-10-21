@@ -211,6 +211,31 @@ class WorkflowAnalysisRepositoryIT {
     }
 
     @Test
+    void persistsBedrockProvenanceAndFindingsThroughTheExistingRestDetail() throws Exception {
+        var base = failure(42);
+        var failedJob = base.failedJobs().getFirst();
+        var javaAnalysis = failedJob.analysis();
+        var explanation = new com.githubci.intelligence.dto.FailureAnalysis(
+                javaAnalysis.category(), javaAnalysis.errorMessage(), javaAnalysis.suspectedCause(),
+                javaAnalysis.suggestedInvestigation(), javaAnalysis.confidence(), javaAnalysis.evidence(),
+                javaAnalysis.logContext(), javaAnalysis.normalizedSignature(), javaAnalysis.fingerprint(),
+                "BEDROCK", "mock-model", javaAnalysis.diagnosticFindings(), null);
+        var enriched = new WorkflowRunAnalysis(base.repository(), base.runId(), List.of(
+                new FailedJobAnalysis(failedJob.job(), failedJob.logStatus(), failedJob.logMessage(),
+                        explanation, failedJob.logObjectKey())));
+        var run = run(42, 1, NOW);
+        repository.complete(repository.claim(REPOSITORY, run), enriched);
+        assertEquals(enriched, repository.findRun(REPOSITORY, 42, 1).orElseThrow().analysis());
+        mvc.perform(get("/api/repositories/" + run.repository().id() + "/failures/42").param("attempt", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.analysisSource").value("BEDROCK"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.modelIdentifier").value("mock-model"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].kind").value("OBSERVATION"))
+                .andExpect(jsonPath("$.data.failedJobs[0].analysis.diagnosticFindings[0].evidence[0].lineNumber")
+                        .value(javaAnalysis.evidence().getFirst().lineNumber()));
+    }
+
+    @Test
     void renewalExtendsLeaseWithoutLosingMetadataAndFencesOldOwners() {
         var run = run(42, 1, NOW);
         var claim = repository.claim(REPOSITORY, run);

@@ -22,6 +22,26 @@ class FailureAnalyzerServiceTest {
 
     private final FailureAnalyzerService analyzer = new FailureAnalyzerService();
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "echo \"Error: Could not connect to PostgreSQL\"\nexit 1\nError: Could not connect to PostgreSQL",
+            "Run echo 'org.postgresql.util.PSQLException: Connection refused'\n"
+                    + "org.postgresql.util.PSQLException: Connection refused\nError: Process completed with exit code 1.",
+            "printf 'psql: could not connect'\npsql: could not connect",
+            "echo org.postgresql.util.PSQLException: Connection refused\n"
+                    + "org.postgresql.util.PSQLException: Connection refused",
+            "Error: Could not connect to PostgreSQL",
+            "PostgreSQL connection refused"
+    })
+    void doesNotTreatPrintedMessagesOrProductNamesAsDatabaseOperations(String logs) {
+        var result = analyzer.analyze(logs);
+        assertEquals(FailureCategory.UNKNOWN, result.category());
+        assertEquals(ConfidenceLevel.LOW, result.confidence());
+        assertTrue(result.diagnosticFindings().stream()
+                .filter(finding -> finding.kind() == com.githubci.intelligence.dto.DiagnosticFinding.Kind.HYPOTHESIS)
+                .allMatch(finding -> finding.confidence() == ConfidenceLevel.LOW));
+    }
+
     static Stream<Arguments> failures() {
         return Stream.of(
                 Arguments.of(FailureCategory.JAVA_COMPILATION,

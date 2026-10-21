@@ -554,8 +554,8 @@ by `logObjectKey`. See [persistence limits and access patterns](docs/dynamodb.md
 returns an immutable `FailureAnalysis` record. It is a Spring service but can also
 be constructed directly with `new FailureAnalyzerService()`; no Spring context,
 GitHub token, AWS credentials, network requests or paid AI APIs are required.
-It is used by the analysis endpoint; persisted counts appear in the repository
-dashboard, but detailed failure inspection still uses labeled sample data.
+It is used by the analysis endpoint and webhook worker; persisted diagnoses appear
+on the React Workflow Failures page.
 
 The result contains:
 
@@ -575,6 +575,15 @@ The result contains:
 - `logContext`: up to two nonblank surrounding lines on either side of each
   selected diagnostic, within the same Actions log section. Both lists preserve
   one-based original line numbers; ANSI colors and Actions timestamps are removed.
+- `analysisSource`: `JAVA`, `BEDROCK`, or `LEGACY_JAVA` for older stored results.
+- `modelIdentifier`: the configured Bedrock model/inference profile used for an
+  accepted explanation; null for Java results.
+- `diagnosticFindings`: separate `OBSERVATION` and `HYPOTHESIS` entries, each with
+  its own confidence and supporting `evidence` (one-based sanitized job-log lines).
+  Hypotheses always have LOW confidence. Classification confidence is **not**
+  confidence that a suspected root cause is true.
+- `fallbackReason`: `BEDROCK_UNAVAILABLE` or `BEDROCK_INVALID_RESPONSE` when an
+  attempted explanation falls back to Java; null when disabled or successful.
 
 Specific diagnostics take precedence over generic Maven/Docker wrappers. Distinct
 categories with equally strong evidence produce `UNKNOWN` instead of guessing a
@@ -582,7 +591,12 @@ single causal chain. PostgreSQL classification requires connection-specific
 PostgreSQL evidence on the diagnostic or within two lines in the same section;
 an unrelated service-start message, port 5432 alone, or `ECONNREFUSED` alone does
 not suffice. Explicit generic network targets are not associated with a different
-nearby PostgreSQL target. Echoed Actions commands are not treated as diagnostics.
+nearby PostgreSQL target. Recognizable echo/printf commands and their matching
+printed output are not treated as client diagnostics. For example, run
+`39549084142`'s `echo "Error: Could not connect to PostgreSQL"` followed by `exit 1`
+is `UNKNOWN` / `LOW`, not proof of a connection attempt or PostgreSQL outage.
+Even a genuine client diagnostic does not distinguish an outage from networking,
+credentials or configuration without further investigation.
 Null input is rejected with `IllegalArgumentException`; blank, successful and
 unrecognized logs return low-confidence `UNKNOWN` results.
 
@@ -596,6 +610,82 @@ Run the full-context endpoint integration tests with mocked GitHub HTTP response
 
 ```sh
 mvn -f backend/pom.xml -Dtest=WorkflowRunAnalysisIntegrationTest test
+```
+
+### Optional contextual explanations with Amazon Bedrock
+
+The backend uses AWS SDK for Java v2's **Converse API**, never browser-side AWS
+credentials. Bedrock is **disabled by default**. When enabled, each failed job
+with available logs gets at most one bounded SDK call (30-second total timeout,
+no SDK retries). The existing Java analyzer always runs first and retains control
+of the category, classification confidence, and fingerprint. Bedrock adds
+contextual hypotheses, investigation suggestions, and cited findings; it cannot
+promote classification confidence. Webhook, SQS, S3 and persistence paths are unchanged.
+
+Configure the backend process environment before starting it:
+
+```sh
+export BEDROCK_ENABLED=true
+export BEDROCK_REGION=us-east-1
+export BEDROCK_MODEL_ID='<Converse-compatible model ID or inference-profile ID/ARN>'
+# Optional; default false. Sends relevant, sanitized, bounded head-commit patches.
+export BEDROCK_INCLUDE_COMMIT_CHANGES=true
+```
+
+Provide real credentials through the SDK default chain, preferably a workload IAM
+role in AWS or an authenticated `AWS_PROFILE` locally. For temporary environment
+credentials, supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`AWS_SESSION_TOKEN`. Remove dummy `local` environment credentials before using a
+profile, because environment credentials take precedence. Maven does not read
+`.env`. The provided Compose backend uses dummy credentials and does not forward
+Bedrock settings; use a host-run backend for live testing, or deliberately provide
+a secure deployment/Compose override. Never put credentials in React/Vite variables.
+
+The backend role needs **`bedrock:InvokeModel`** on the chosen foundation model
+or inference profile (Converse has no separate IAM action). Cross-region inference
+profiles also require permission on their destination model resources and regions.
+Choose a model available in `BEDROCK_REGION` that supports Converse and the supplied
+inference parameters, meet any provider subscription/model-access requirements,
+and check account quotas/SCPs. There is no default paid model. Existing S3, SQS,
+DynamoDB and any KMS permissions remain necessary and unchanged. For optional
+commit patches, the GitHub token also needs repository **Contents: read**, in
+addition to **Actions: read**; unavailable patches are reported as missing context,
+not a failure of log analysis.
+
+Only redacted, numbered excerpts (up to 100 lines, 500 characters per line),
+up to eight failed steps, and optionally up to eight relevant head-commit patches
+(1,500 characters each) are sent. Relevant means mentioned log paths or CI/build
+configuration files. Context is explicitly partial: this is not a PR/base comparison,
+and missing/binary patches are marked unavailable. Redaction also covers metadata,
+patches and model output, but cannot guarantee removal of arbitrary application
+secrets or sensitive business data; review your data policy before opting in.
+Logs/patches are treated as untrusted data, never prompt instructions.
+
+Responses must be a strict JSON object with bounded, nonempty fields and 1-6
+typed findings. Every observation must cite supplied log lines, all references
+are validated, hypothesis confidence must be LOW, and finding confidence cannot
+exceed the Java classification confidence. Observation descriptions must exactly
+quote a cited line; model interpretation is only allowed as a hypothesis.
+Referenced text is copied from the
+sanitized input, not trusted from the model. Invalid/truncated/refused responses,
+throttling, missing credentials, permission failures and SDK transport failures
+produce explicit Java fallback reasons; prompts/upstream errors are not logged.
+Schema validation cannot prove the model's interpretation is correct: the UI
+labels suspected causes as unverified and exposes the supporting logs.
+
+All fields persist in the existing DynamoDB serialized analysis attribute and
+are returned by the existing REST detail route; no table/index migration is
+needed. Existing completed analyses are intentionally immutable and returned from
+cache. This change **does not rewrite run 39549084142's stored diagnosis**. Old
+records are labeled `LEGACY_JAVA` in the UI; rerun the workflow to create a new
+attempt for live testing. Redelivering the same completed attempt will not
+regenerate analysis or incur another Bedrock call.
+
+Unit tests mock the SDK and make no paid model calls. Spring integration tests
+explicitly disable Bedrock, even if it is enabled in your shell:
+
+```sh
+mvn -f backend/pom.xml -Dtest=FailureAnalyzerServiceTest,ContextualFailureAnalyzerTest,WorkflowRunAnalysisIntegrationTest test
 ```
 
 Evidence and context can contain sensitive raw log content; treat the result
@@ -677,7 +767,11 @@ tables, empty states and explicit retries support investigation without invented
 metrics. See [historical analytics](docs/analysis-api.md#historical-analytics)
 for count definitions and historical data coverage limitations.
 
-Workflow Failures still uses explicitly labeled sample data.
+Workflow Failures retrieves paginated persisted failures from the Spring Boot
+REST API, with repository selection, explicit refresh/retry and load-more controls.
+Select a run/attempt to view its failed jobs, log availability, analysis category,
+confidence, evidence and suggested investigation. GitHub links open the original
+run. No sample data or browser-side GitHub credentials are used on this route.
 
 The backend health indicator calls `GET /api/health` using a shared Axios client
 and TanStack Query. It shows checking, connected (`status: "UP"`), non-UP, invalid
@@ -821,7 +915,7 @@ docker compose config --quiet
 The root npm build compiles the frontend and infrastructure, **not** the Maven
 backend. GitHub Actions runs independent backend verification, frontend build,
 and CDK synthesis jobs on pushes and pull requests. The frontend can also be smoke-tested in a browser: navigate all five routes,
-filter repositories and sample failures, resize to mobile and use the navigation
+filter repositories, open persisted failure analyses, resize to mobile and use the navigation
 drawer, and verify health checking with the backend both running and stopped.
 Health responses can be intercepted to verify non-UP and malformed payloads.
 Run `npm test --workspace frontend` for Vitest/React Testing Library coverage

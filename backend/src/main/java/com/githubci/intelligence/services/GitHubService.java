@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.Locale;
 
 import com.githubci.intelligence.dto.GitHubJob;
+import com.githubci.intelligence.dto.GitHubCommit;
 import com.githubci.intelligence.dto.GitHubJobs;
 import com.githubci.intelligence.dto.GitHubWorkflow;
 import com.githubci.intelligence.dto.GitHubWorkflowRun;
@@ -57,6 +58,13 @@ public class GitHubService {
     public GitHubWorkflowRun getWorkflowRun(String owner, String repo, long runId) {
         validateId(runId);
         return get(repositoryPath(owner, repo) + "/actions/runs/" + runId, GitHubWorkflowRun.class);
+    }
+
+    public GitHubCommit getCommit(String owner, String repo, String sha) {
+        if (sha == null || !sha.matches("[a-fA-F0-9]{40,64}")) {
+            throw new IllegalArgumentException("A full commit SHA is required");
+        }
+        return get(repositoryPath(owner, repo) + "/commits/" + sha + "?per_page=20", GitHubCommit.class);
     }
 
     public GitHubWorkflowRun getWorkflowRunAttempt(String owner, String repo, long runId, int attempt) {
