@@ -13,6 +13,12 @@ behind an access-controlled boundary until authorization is implemented.**
 Existing tables require the [read-index migration and backfill](docs/dynamodb.md#read-api-schema-and-migration)
 before using these routes.
 
+The opt-in [local MCP server](docs/mcp.md) exposes four read-only tools over
+stateless Streamable HTTP in the same Spring Boot application. It reads stored
+analyses without invoking Bedrock and rejects non-loopback access. It is disabled
+by default and unavailable in the production profile; do not deploy or proxy it
+until authentication and repository-level authorization exist.
+
 ## Technology
 
 - **Backend:** Java 21, Spring Boot 4.1.1, Maven.

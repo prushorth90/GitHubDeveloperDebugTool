@@ -9,7 +9,7 @@ running directly, set `SERVER_ADDRESS=127.0.0.1` for local-only access.
 
 All endpoints below read DynamoDB only, without GitHub, S3 or analysis calls.
 `FailureService` owns validation, mapping, filtering, similarity and statistics;
-future MCP adapters can call the same public methods without invoking HTTP.
+the [local MCP adapter](mcp.md) calls the same public methods without invoking HTTP.
 Storage entities, leases, processing tokens and S3 object keys are not returned.
 
 ## Routes

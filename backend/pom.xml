@@ -19,6 +19,7 @@
   <properties>
     <java.version>21</java.version>
     <aws-sdk.version>2.31.78</aws-sdk.version>
+    <mcp-sdk.version>2.1.0</mcp-sdk.version>
   </properties>
 
   <dependencyManagement>
@@ -34,6 +35,11 @@
   </dependencyManagement>
 
   <dependencies>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp</artifactId>
+      <version>${mcp-sdk.version}</version>
+    </dependency>
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>bedrockruntime</artifactId>

@@ -20,6 +20,8 @@ management:
       show-details: never
 
 app:
+  mcp:
+    enabled: ${MCP_ENABLED:false}
   bedrock:
     enabled: ${BEDROCK_ENABLED:false}
     region: ${BEDROCK_REGION:${AWS_REGION:us-east-1}}
